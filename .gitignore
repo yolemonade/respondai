@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Model checkpoints & data (entire trees)
+checkpoints/
+data_cache/
+datasets/
+*.mid
+*.midi
+*.wav
+*.mp3
+*.pt
+*.ckpt
+
+# Logs
+*.log
+runs/
+tb_logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
