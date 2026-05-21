@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import random
-import time
 from typing import List, Optional
 
 import matplotlib
@@ -642,7 +641,7 @@ KEYBOARD_JS = """() => {
     };
     window.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' && document.querySelector('.ra-modal.open')) {
-        e.preventDefault();
+      e.preventDefault();
         window.respondAIModal.close();
       }
     }, true);
@@ -655,14 +654,13 @@ KEYBOARD_JS = """() => {
     if (isInputLocked()) return;
     const key = e.target.closest && e.target.closest('[data-midi]');
     if (!key || !key.dataset.midi) return;
-    e.preventDefault();
+      e.preventDefault();
     const midi = parseInt(key.dataset.midi, 10);
     if (!isNaN(midi)) { sendNote(midi); flashKey(midi); }
   }, true);
 
   function isGameKey(e) {
     if (e.key === 'Enter' || e.key === 'Backspace') return true;
-    if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return true;
     return midiFromEvent(e) !== null;
   }
 
@@ -672,18 +670,6 @@ KEYBOARD_JS = """() => {
     if (e.repeat) return;
     e.preventDefault();
     e.stopImmediatePropagation();
-    if (e.shiftKey && e.key === 'ArrowUp') {
-      baseOctave = Math.min(baseOctave + 1, 7);
-      const d = document.getElementById('oct-display');
-      if (d) d.textContent = baseOctave;
-      return;
-    }
-    if (e.shiftKey && e.key === 'ArrowDown') {
-      baseOctave = Math.max(baseOctave - 1, 0);
-      const d = document.getElementById('oct-display');
-      if (d) d.textContent = baseOctave;
-      return;
-    }
     if (e.key === 'Backspace') { sendNote(-1); return; }
     if (e.key === 'Enter') { clickConfirm(); return; }
     const midi = midiFromEvent(e);
@@ -691,7 +677,7 @@ KEYBOARD_JS = """() => {
     if (midi !== null && !activeKeys.has(tok)) {
       activeKeys.add(tok);
       if (midi >= 21 && midi <= 108) {
-        sendNote(midi);
+      sendNote(midi);
         flashKey(midi);
       }
     }
@@ -864,13 +850,6 @@ def render_piano_html(base_octave: int = 4) -> str:
 
     return (
         f'<div class="ra-piano-wrap">'
-        f'<div class="ra-piano-help">'
-        f'<span class="ra-help-dot">●</span>'
-        f' OCT <span id="oct-display">{base_octave}</span>'
-        f'&nbsp;&nbsp;<kbd>Shift+↑↓</kbd> octave'
-        f'&nbsp;&nbsp;<kbd>Backspace</kbd> cancel'
-        f'&nbsp;&nbsp;<kbd>Enter</kbd> confirm'
-        f'</div>'
         f'<div class="ra-piano-keys" style="position:relative;width:{total_w}px;height:{WH}px;">'
         + ''.join(whites)
         + ''.join(blacks)
@@ -999,11 +978,6 @@ def s5_html(state: dict) -> str:
     grade_colors = {"S": "#FFD27A", "A": "#E8E2F2", "B": "#C8C5E8", "C": "#DCD7F0"}
     gc = grade_colors.get(grade, "#fff")
 
-    round_grades_html = " | ".join(
-        f"R{rr['round_num']} {round_grade(int(sum(s['total'] for s in rr['exchange_scores'])/len(rr['exchange_scores'])))}"
-        for rr in round_results
-    )
-
     bonus_detail = ""
     if summary["bonus_score"] or r5_motif_bonus:
         bonus_detail = (
@@ -1020,7 +994,6 @@ def s5_html(state: dict) -> str:
   <div class="s5-grade" style="color:{gc};">{grade}</div>
   <div class="s5-total">{final_total} <span class="s5-of">/ 5000</span></div>
   {bonus_detail}
-  <div class="s5-rounds">{round_grades_html}</div>
   <div class="s5-halfsphere"></div>
 </div>
 """
@@ -1132,6 +1105,13 @@ footer, .footer { display: none !important; }
   background: var(--light-bg) !important;
   border: 1px solid rgba(0,0,0,0.07) !important;
   color: var(--light-h) !important;
+}
+/* S1 hero must never scroll — the orbit SVGs intentionally overflow the cosmos box */
+.panel-s1 {
+  overflow: hidden !important;
+}
+.panel-s1 .screen-body {
+  overflow: hidden !important;
 }
 /* Dark screens: S3, S4, S5 */
 .panel-s3, .panel-s4, .panel-s5 {
@@ -1606,53 +1586,40 @@ button.pill-cta.pill-cta-primary:hover {
   display: flex; flex-direction: column; align-items: center;
   width: 100%; min-height: 100%;
   background: transparent;
-  padding: 32px 24px 24px;
+  padding: 40px 32px 28px;
   box-sizing: border-box;
   text-shadow: 0 2px 18px rgba(14,14,14,0.55);
 }
 .s5-grade { text-shadow: 0 3px 22px rgba(14,14,14,0.7) !important; }
 .s5-label {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 400;
-  letter-spacing: 2.5px;
+  letter-spacing: 3px;
   text-transform: uppercase;
   color: var(--accent);
 }
 .s5-headline {
-  margin-top: 16px;
-  font-size: clamp(20px, 3vw, 28px);
+  margin-top: 20px;
+  font-size: clamp(24px, 3.5vw, 34px);
   font-weight: 400;
-  letter-spacing: -0.3px;
+  letter-spacing: -0.5px;
   line-height: 1.3;
   color: #F0F0F0;
   text-align: center;
 }
 .s5-grade {
-  margin-top: 14px;
-  font-size: 64px;
+  margin-top: 20px;
+  font-size: 96px;
   font-weight: 300;
-  letter-spacing: 6px;
+  letter-spacing: 8px;
   line-height: 1;
 }
 .s5-total {
-  margin-top: 6px;
-  font-size: 18px; font-weight: 300;
-  color: #B8B8B8;
+  margin-top: 10px;
+  font-size: 28px; font-weight: 400;
+  color: var(--accent-deep);
 }
-.s5-of { color: #6B6B6B; }
-.s5-rounds {
-  position: absolute !important;
-  left: 50%;
-  bottom: 24px;
-  transform: translateX(-50%);
-  z-index: 2 !important;
-  font-size: 22px; font-weight: 500;
-  letter-spacing: 2.5px; text-transform: uppercase;
-  color: #DDDDDD;
-  white-space: nowrap;
-  text-shadow: 0 2px 14px rgba(14,14,14,0.7);
-  text-align: center;
-}
+.s5-of { color: var(--accent); }
 .s5-halfsphere {
   position: absolute;
   left: 50%;
@@ -1690,18 +1657,13 @@ button.pill-cta.pill-cta-primary:hover {
 }
 .panel-s5 .ra-final-bonus {
   position: relative; z-index: 2;
-  color: var(--dark-sub); font-size: 11px;
-  margin-top: 8px; letter-spacing: 0.5px;
+  color: var(--accent); font-size: 13px;
+  margin-top: 12px; letter-spacing: 0.5px;
 }
 
 .ra-piano-wrap {
   user-select: none; padding: 10px 8px; border-radius: 10px; text-align: center;
   background: var(--dark-card); border: 1px solid rgba(255,255,255,0.08);
-}
-.ra-piano-help { color: var(--dark-sub); font-size: 11px; margin-bottom: 8px; line-height: 1.65; }
-.ra-piano-help kbd {
-  background: rgba(255,255,255,0.06); color: var(--dark-h); border: 1px solid rgba(255,255,255,0.15);
-  padding: 1px 5px; border-radius: 4px; font-size: 10px;
 }
 .ra-piano-keys { display: inline-block; position: relative; }
 .ra-key { transition: transform .08s ease, opacity .12s ease; }
@@ -1817,6 +1779,11 @@ button.pill-cta.pill-cta-primary:hover {
 }
 .game-pill-primary:hover:not(:disabled) {
   box-shadow: 0 8px 26px rgba(0,0,0,0.18) !important;
+}
+/* Confirm button — trim sideways a touch so it doesn't feel oversized */
+#btn-confirm {
+  max-width: 92% !important;
+  margin: 0 auto !important;
 }
 
 /* Modals (S1 nav popups) */
@@ -2076,7 +2043,7 @@ with gr.Blocks(title="RespondAI") as app:
       <p>RespondAI는 AI와 번갈아 짧은 멜로디를 주고받는 즉흥 연주 세션 게임입니다.</p>
       <ol class="ra-modal-list">
         <li><b>세션 시작</b> — “Start session” 버튼을 누르면 무작위로 조성(Key)과 BPM이 정해집니다.</li>
-        <li><b>나의 차례</b> — 화면 가상 건반을 마우스로 누르거나, 키보드 <kbd>A S D F G H J K L</kbd> (흰 건반), <kbd>W E R T Y U I O</kbd> (검은 건반)으로 노트를 입력합니다. <kbd>Backspace</kbd>로 마지막 노트 취소, <kbd>Shift + ↑/↓</kbd>로 옥타브 변경, <kbd>Enter</kbd>로 확정합니다.</li>
+        <li><b>나의 차례</b> — 화면 가상 건반을 마우스로 누르거나, 키보드 <kbd>A S D F G H J K L</kbd> (흰 건반), <kbd>W E R T Y U I O</kbd> (검은 건반)으로 노트를 입력합니다. <kbd>Backspace</kbd>로 마지막 노트 취소, <kbd>Enter</kbd>로 확정합니다.</li>
         <li><b>AI 응답</b> — 내 멜로디를 듣고 AI가 응답을 생성·연주합니다.</li>
         <li><b>교환 반복</b> — 한 라운드당 3번 주고받습니다. 라운드가 끝나면 조성 일관성·리듬 유사도·모티프 활용·창의성 보너스 4가지 기준으로 점수가 계산됩니다.</li>
         <li><b>최종 결과</b> — 모든 라운드가 끝나면 누적 점수와 등급(S/A/B/C)이 나옵니다. 1라운드 첫 멜로디를 마지막 라운드에서 다시 사용하면 모티프 보너스 +150점이 추가됩니다.</li>
@@ -2135,7 +2102,7 @@ with gr.Blocks(title="RespondAI") as app:
                 s3_audio     = gr.Audio(label="", autoplay=True, visible=False, elem_id="s3-exchange-audio")
             with gr.Row(elem_classes=["screen-actions"]):
                 with gr.Column(scale=1, min_width=90, elem_classes=["s3-btn-left"]):
-                    btn_cancel  = gr.Button("↺  Undo", size="sm",
+                    btn_cancel  = gr.Button("↺  Undo  (Backspace)", size="sm",
                                             elem_classes=["game-pill", "game-pill-sm"])
                     btn_preview = gr.Button("♪\ufe0e  Preview", size="sm",
                                             elem_classes=["game-pill", "game-pill-sm"])
@@ -2273,8 +2240,8 @@ with gr.Blocks(title="RespondAI") as app:
         btn.click(
             lambda st, m=midi: on_note_event(m, st),
             inputs=[state],
-            outputs=[state, s3_roll, s3_note_list],
-        )
+        outputs=[state, s3_roll, s3_note_list],
+    )
 
     # Cancel last note
     def on_cancel(st):
@@ -2285,10 +2252,13 @@ with gr.Blocks(title="RespondAI") as app:
     btn_cancel.click(on_cancel, inputs=[state],
                      outputs=[state, s3_roll, s3_note_list])
 
-    # Preview (play current notes)
+    # Preview (play current notes) — 2-step update forces the <audio> element
+    # to reload its src; otherwise Gradio reuses the same temp file hash and the
+    # browser silently keeps the previous buffer.
     def on_preview(st):
+        yield gr.update(value=None, autoplay=False, visible=True)
         audio = build_round_audio(st["current_notes"], [], st["bpm"])
-        return gr.update(value=audio, visible=True)
+        yield gr.update(value=audio, autoplay=True, visible=True)
 
     btn_preview.click(on_preview, inputs=[state], outputs=[s3_audio])
 
@@ -2374,8 +2344,6 @@ with gr.Blocks(title="RespondAI") as app:
         st["current_notes"] = []
 
         audio = build_round_audio(user_notes, ai_notes, st["bpm"])
-        ms = audio_duration_ms(audio)
-        time.sleep(max(0.8, min(ms / 1000.0, AI_RESPONSE_MAX_SEC + 2.0)))
         audio_up = gr.update(value=audio, visible=True, autoplay=True)
 
         completed = len(st["exchange_log"])
@@ -2420,9 +2388,15 @@ with gr.Blocks(title="RespondAI") as app:
             audio_up,
         )
 
+    # Clear the audio element first so the browser unloads any Preview src
+    # currently in its buffer — otherwise the new AI take won't autoplay.
     confirm_chain = btn_confirm.click(
+        lambda: gr.update(value=None, autoplay=False),
+        inputs=None, outputs=s3_audio,
+    ).then(
         on_confirm, inputs=[state], outputs=_confirm_outputs, show_progress="full",
     )
+    confirm_chain.then(fn=None, js=PLAY_EXCHANGE_JS)
     confirm_chain.then(fn=None, js=FOCUS_GAME_JS)
 
     # S4 "다음 라운드" → S2
