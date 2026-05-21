@@ -585,9 +585,8 @@ KEYBOARD_JS = """() => {
   function flashKey(midi) {
     const kEl = document.querySelector('[data-midi="' + midi + '"]');
     if (!kEl) return;
-    const orig = kEl.style.background;
-    kEl.style.background = '#ffe066';
-    setTimeout(() => { kEl.style.background = orig; }, 130);
+    kEl.classList.add('active');
+    setTimeout(() => kEl.classList.remove('active'), 150);
   }
 
   function clickConfirm() {
@@ -707,11 +706,11 @@ def render_piano_html(base_octave: int = 4) -> str:
         name = NOTE_NAMES[midi % 12] + str(midi // 12 - 1)
         whites.append(
             f'<div data-midi="{midi}"'
+            f' class="ra-key ra-key-white"'
             f' style="position:absolute;left:{left}px;width:{WW-2}px;height:{WH}px;'
-            f'background:#ececec;border:1px solid #666;border-radius:0 0 4px 4px;'
             f'cursor:pointer;display:flex;align-items:flex-end;justify-content:center;'
             f'padding-bottom:3px;box-sizing:border-box;">'
-            f'<span style="font-size:8px;color:#999;pointer-events:none;">{name}</span>'
+            f'<span class="ra-key-label">{name}</span>'
             f'</div>'
         )
 
@@ -720,25 +719,25 @@ def render_piano_html(base_octave: int = 4) -> str:
         left = (bi + 1) * WW - BW // 2 - 1
         blacks.append(
             f'<div data-midi="{midi}"'
+            f' class="ra-key ra-key-black"'
             f' style="position:absolute;left:{left}px;top:0;width:{BW}px;height:{BH}px;'
-            f'background:#1a1a1a;border:1px solid #000;border-radius:0 0 3px 3px;'
+            f'border-radius:0 0 3px 3px;'
             f'cursor:pointer;z-index:2;">'
             f'</div>'
         )
 
     return (
-        f'<div style="user-select:none;padding:10px 0;background:#111122;'
-        f'border-radius:8px;text-align:center;">'
-        f'<div style="color:#667;font-size:11px;margin-bottom:6px;">'
+        f'<div class="ra-piano-wrap">'
+        f'<div class="ra-piano-help">'
         f'옥타브 <span id="oct-display">{base_octave}</span>'
         f' &nbsp;|&nbsp;'
-        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">Shift+↑↓</kbd> 옥타브'
+        f'<kbd>Shift+↑↓</kbd> 옥타브'
         f' &nbsp;'
-        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">a s d f g h j k l</kbd> '
-        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">w e r t y u i o</kbd> 또는 '
-        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">ㅁ ㄴ ㅇ ㄹ ㅎ ㅗ ㅓ ㅏ ㅣ / ㅈ ㄷ ㄱ ㅅ ㅛ ㅕ ㅑ ㅐ</kbd>'
+        f'<kbd>a s d f g h j k l</kbd> '
+        f'<kbd>w e r t y u i o</kbd> 또는 '
+        f'<kbd>ㅁ ㄴ ㅇ ㄹ ㅎ ㅗ ㅓ ㅏ ㅣ / ㅈ ㄷ ㄱ ㅅ ㅛ ㅕ ㅑ ㅐ</kbd>'
         f'</div>'
-        f'<div style="display:inline-block;position:relative;width:{total_w}px;height:{WH}px;">'
+        f'<div class="ra-piano-keys" style="width:{total_w}px;height:{WH}px;">'
         + ''.join(whites)
         + ''.join(blacks)
         + '</div></div>'
@@ -762,45 +761,42 @@ def hud_html(state: dict) -> str:
         phase_label = "🏁 게임 종료"
         phase_color = "#9ef"
     return f"""
-<div style="background:#0d0d2a;border-radius:8px;padding:10px 18px;
-            display:flex;align-items:center;justify-content:space-between;
-            font-family:monospace;color:#ccd;">
-  <div>
-    <span style="font-size:18px;font-weight:bold;">R{state['round']}/{TOTAL_ROUNDS}</span>
-    <span style="margin-left:12px;color:#aab;">교환 {state['exchange']}/{MAX_EXCHANGES}</span>
+<div class="ra-hud">
+  <div class="ra-hud-group">
+    <span class="ra-hud-round">R{state['round']}/{TOTAL_ROUNDS}</span>
+    <span class="ra-hud-exchange">교환 {state['exchange']}/{MAX_EXCHANGES}</span>
   </div>
-  <div>
-    <span style="background:#1a1a3e;padding:3px 8px;border-radius:4px;margin-right:8px;">
+  <div class="ra-hud-group">
+    <span class="ra-chip">
       🎼 {state['key']}
     </span>
-    <span style="background:#1a1a3e;padding:3px 8px;border-radius:4px;">
+    <span class="ra-chip">
       ♩ {state['bpm']} BPM
     </span>
   </div>
-  <div>
-    <span style="font-size:20px;font-weight:bold;color:#f4c430;">
+  <div class="ra-hud-group">
+    <span class="ra-hud-score">
       {state['total_score']} pts
     </span>
   </div>
-  <div style="color:{phase_color};font-weight:bold;">{phase_label}</div>
+  <div class="ra-hud-phase" style="color:{phase_color};">{phase_label}</div>
 </div>
 """
 
 
 def note_list_html(notes: List[Note]) -> str:
     if not notes:
-        return '<div style="color:#556;font-size:12px;padding:6px;">노트 없음 — 건반을 눌러 입력하세요</div>'
+        return '<div class="ra-note-empty">노트 없음 - 건반을 눌러 입력하세요</div>'
     NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
     names = [f"{NOTE_NAMES[n.pitch % 12]}{n.pitch // 12 - 1}" for n in notes]
     items = "".join(
-        f'<span style="background:#1a2a4a;border:1px solid #335;border-radius:4px;'
-        f'padding:2px 6px;margin:2px;font-size:12px;color:#8af;">{name}</span>'
+        f'<span class="ra-note-chip">{name}</span>'
         for name in names
     )
     return (
-        f'<div style="display:flex;flex-wrap:wrap;padding:4px;">'
+        f'<div class="ra-note-list">'
         f'{items}'
-        f'<span style="color:#556;font-size:11px;margin:4px;">{len(notes)}/{MAX_NOTES}</span>'
+        f'<span class="ra-note-count">{len(notes)}/{MAX_NOTES}</span>'
         f'</div>'
     )
 
@@ -808,12 +804,12 @@ def note_list_html(notes: List[Note]) -> str:
 def score_bar_html(label: str, value: int, max_val: int, color: str) -> str:
     pct = min(100, int(value / max_val * 100))
     return f"""
-<div style="margin:4px 0;">
-  <div style="display:flex;justify-content:space-between;font-size:12px;color:#aab;margin-bottom:2px;">
+<div class="ra-score-row">
+  <div class="ra-score-head">
     <span>{label}</span><span>{value}/{max_val}</span>
   </div>
-  <div style="background:#1a1a3e;border-radius:4px;height:10px;">
-    <div style="background:{color};width:{pct}%;height:10px;border-radius:4px;transition:width .4s;"></div>
+  <div class="ra-score-track">
+    <div style="background:linear-gradient(90deg,{color},#00f3ff);width:{pct}%;height:10px;border-radius:999px;transition:width .4s;"></div>
   </div>
 </div>
 """
@@ -836,15 +832,15 @@ def s4_html(state: dict) -> str:
     )
     r5_bonus = ""
     if rr["round_num"] == 5 and rr.get("r5_motif_bonus"):
-        r5_bonus = '<div style="color:#ffd700;font-size:14px;margin-top:8px;">🌟 R5 모티프 보너스 +150점!</div>'
+        r5_bonus = '<div class="ra-r5-bonus">🌟 R5 모티프 보너스 +150점!</div>'
 
     feedback = exs[-1].get("feedback", "")
     return f"""
-<div style="background:#0d0d2a;border-radius:10px;padding:14px 16px;color:#ccd;">
-  <h2 style="margin:0 0 4px;color:#fff;font-size:18px;">Round {rr['round_num']} 결과</h2>
-  <div style="font-size:22px;margin:4px 0;">{grade}</div>
-  <div style="font-size:18px;color:#f4c430;margin-bottom:8px;">{round_total} / 1000</div>
-  <div style="color:#8af;font-size:13px;margin-bottom:12px;font-style:italic;">"{feedback}"</div>
+<div class="ra-result-card">
+  <h2 class="ra-result-title">Round {rr['round_num']} 결과</h2>
+  <div class="ra-result-grade">{grade}</div>
+  <div class="ra-result-total">{round_total} / 1000</div>
+  <div class="ra-result-feedback">"{feedback}"</div>
   {bars}
   {r5_bonus}
 </div>
@@ -887,18 +883,18 @@ def s5_html(state: dict) -> str:
     bonus_detail = ""
     if summary["bonus_score"] or r5_motif_bonus:
         bonus_detail = (
-            f'<div style="color:#8f8;font-size:13px;margin-top:6px;">'
+            f'<div class="ra-final-bonus">'
             f'콤보/조성 보너스: +{summary["bonus_score"]} &nbsp; '
             f'R5 모티프 보너스: +{r5_motif_bonus}'
             f'</div>'
         )
 
     return f"""
-<div style="background:#0d0d2a;border-radius:10px;padding:16px;color:#ccd;text-align:center;">
-  <div style="font-size:52px;font-weight:900;color:{gc};letter-spacing:4px;">{grade}</div>
-  <div style="font-size:26px;color:#f4c430;margin:6px 0;">{final_total} / 5000</div>
+<div class="ra-final-card">
+  <div class="ra-final-grade" style="color:{gc};">{grade}</div>
+  <div class="ra-final-total">{final_total} / 5000</div>
   {bonus_detail}
-  <div style="font-size:13px;color:#889;margin-top:12px;">{round_grades_html}</div>
+  <div class="ra-final-rounds">{round_grades_html}</div>
 </div>
 """
 
@@ -906,11 +902,31 @@ def s5_html(state: dict) -> str:
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 
 APP_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Press+Start+2P&display=swap');
+
+:root {
+  --bg-0: #0d0e15;
+  --bg-1: #12131c;
+  --panel: rgba(18, 20, 34, 0.86);
+  --line: rgba(188, 19, 254, 0.44);
+  --txt-main: #e9efff;
+  --txt-sub: #9ba9c9;
+  --neon-blue: #00f3ff;
+  --neon-pink: #ff007f;
+  --neon-purple: #bc13fe;
+  --cyber-yellow: #ffe600;
+}
+
 html, body {
   height: 100% !important;
   margin: 0 !important;
   overflow: hidden !important;
-  background: #0a0a1a !important;
+  color: var(--txt-main) !important;
+  background:
+    radial-gradient(1100px 420px at 10% -20%, rgba(0,243,255,0.15), transparent 70%),
+    radial-gradient(900px 360px at 90% 0%, rgba(255,0,127,0.16), transparent 68%),
+    linear-gradient(180deg, var(--bg-1), var(--bg-0)) !important;
+  font-family: 'Orbitron', 'Apple SD Gothic Neo', 'Nanum Gothic', sans-serif !important;
 }
 .gradio-container {
   max-width: 1000px !important;
@@ -927,6 +943,7 @@ footer, .footer { display: none !important; }
   height: 100% !important;
   overflow: hidden !important;
 }
+.gradio-container, .gradio-container * { color: var(--txt-main); }
 
 /* 건반 브리지: 화면 레이아웃에 안 보이게 (DOM·클릭은 유지) */
 .note-input-layer {
@@ -958,7 +975,11 @@ footer, .footer { display: none !important; }
   justify-content: space-between !important;
   box-sizing: border-box !important;
   overflow: auto !important;
-  padding: 4px 2px 8px !important;
+  padding: 10px !important;
+  background: var(--panel) !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 0 18px rgba(188, 19, 254, 0.22), inset 0 0 14px rgba(0, 243, 255, 0.08) !important;
 }
 .game-stage > .hide {
   display: none !important;
@@ -974,13 +995,24 @@ footer, .footer { display: none !important; }
 .screen-actions, .quick-notes {
   flex: 0 0 auto !important;
   flex-shrink: 0 !important;
-  padding-top: 4px !important;
+  padding-top: 6px !important;
 }
 .screen-actions:last-of-type { margin-top: 0 !important; }
 .screen-actions button:disabled {
   display: none !important;
 }
 .quick-notes button { min-width: 1.8rem !important; padding: 3px 4px !important; font-size: 11px !important; }
+.gradio-button, button {
+  white-space: nowrap !important;
+  background: linear-gradient(180deg, rgba(40,45,70,.94), rgba(18,20,32,.98)) !important;
+  border: 1px solid rgba(0,243,255,.5) !important;
+  color: #f6fbff !important;
+  box-shadow: 0 0 10px rgba(0,243,255,.26) !important;
+}
+.gradio-button:hover, button:hover {
+  border-color: rgba(0,243,255,.9) !important;
+  box-shadow: 0 0 16px rgba(0,243,255,.55) !important;
+}
 
 /* S3: 피아노롤만 넓게, 사이드 viz 숨김 */
 .s3-main .viz-side { display: none !important; }
@@ -995,7 +1027,114 @@ footer, .footer { display: none !important; }
   max-height: 140px !important;
 }
 
-.gradio-button { white-space: nowrap !important; }
+.ra-title-wrap {
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  text-align: center; min-height: 220px;
+}
+.ra-logo {
+  font-family: 'Press Start 2P', 'Orbitron', monospace;
+  font-size: clamp(34px, 7vw, 58px);
+  color: var(--neon-pink);
+  text-shadow: 0 0 10px rgba(255,0,127,.8), 0 0 30px rgba(188,19,254,.45);
+  letter-spacing: 2px;
+}
+.ra-subtitle { margin-top: 14px; font-size: 13px; color: #d6e2ff; opacity: .95; }
+.mode-card { min-height: 52px !important; border-width: 2px !important; }
+
+.ra-round-card, .ra-result-card, .ra-final-card {
+  margin: 0 auto; width: min(96%, 640px);
+  background: rgba(10, 14, 28, 0.86);
+  border: 1px solid rgba(188,19,254,.5);
+  border-radius: 14px;
+  padding: 16px 18px;
+  box-shadow: 0 0 20px rgba(188,19,254,.22), inset 0 0 12px rgba(0,243,255,.08);
+}
+.ra-round-title, .ra-result-title {
+  margin: 0;
+  color: #f5f9ff;
+  font-size: 24px;
+  font-weight: 900;
+}
+.ra-round-meta { margin: 10px 0 6px; color: #dbe6ff; font-size: 17px; }
+.ra-round-cond, .ra-result-feedback { color: #b8c8ed; font-size: 14px; font-style: italic; margin-top: 8px; }
+
+.ra-hud {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(0,243,255,.36);
+  background: rgba(10, 16, 32, .92);
+  box-shadow: 0 0 14px rgba(0,243,255,.2), inset 0 0 10px rgba(188,19,254,.1);
+}
+.ra-hud-group { text-align: center; }
+.ra-hud-round { font-family: 'Press Start 2P', 'Orbitron', monospace; font-size: 12px; color: var(--cyber-yellow); }
+.ra-hud-exchange { margin-left: 10px; color: #e6eeff; font-size: 13px; }
+.ra-chip {
+  display: inline-block; padding: 4px 8px; margin: 0 4px;
+  border-radius: 8px; background: rgba(188,19,254,.12); border: 1px solid rgba(188,19,254,.35);
+}
+.ra-hud-score { font-size: 20px; font-weight: 900; color: var(--cyber-yellow); text-shadow: 0 0 10px rgba(255,230,0,.28); }
+.ra-hud-phase { font-weight: 700; text-align: center; }
+
+.ra-piano-wrap {
+  user-select: none; padding: 10px 8px; border-radius: 10px; text-align: center;
+  background: rgba(10, 14, 26, 0.9); border: 1px solid rgba(0,243,255,.26);
+}
+.ra-piano-help { color: #d8e3ff; font-size: 11px; margin-bottom: 8px; line-height: 1.65; }
+.ra-piano-help kbd {
+  background: rgba(30, 36, 56, 0.95); color: #f6fbff; border: 1px solid rgba(0,243,255,.3);
+  padding: 1px 5px; border-radius: 4px; font-size: 10px;
+}
+.ra-piano-keys { display: inline-block; position: relative; }
+.ra-key { transition: transform .08s ease, box-shadow .12s ease, filter .12s ease; }
+.ra-key-white {
+  background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(224,232,247,.9));
+  border: 1px solid #5f6c8d;
+  border-radius: 0 0 6px 6px;
+}
+.ra-key-black {
+  background: linear-gradient(180deg, #262b39, #090b12);
+  border: 1px solid #000;
+  box-shadow: inset 0 -8px 10px rgba(0,0,0,.35);
+}
+.ra-key.active {
+  transform: translateY(2px) scale(0.99);
+  box-shadow: 0 0 16px rgba(0,243,255,.92), inset 0 0 10px rgba(0,243,255,.6);
+  filter: brightness(1.16);
+}
+.ra-key-label { font-size: 8px; color: #5a6685; pointer-events: none; }
+
+.ra-note-empty { color: #d3def6; font-size: 12px; padding: 6px; }
+.ra-note-list { display: flex; flex-wrap: wrap; padding: 4px; align-items: center; }
+.ra-note-chip {
+  background: rgba(0,243,255,.14); border: 1px solid rgba(0,243,255,.52);
+  border-radius: 999px; padding: 2px 8px; margin: 2px; font-size: 12px; color: #ebf8ff;
+}
+.ra-note-count { color: #b7c5e9; font-size: 11px; margin: 4px; }
+
+.ra-score-row { margin: 6px 0; }
+.ra-score-head { display: flex; justify-content: space-between; font-size: 12px; color: #dce8ff; margin-bottom: 3px; }
+.ra-score-track { background: rgba(24, 32, 58, 0.98); border-radius: 999px; height: 10px; border: 1px solid rgba(188,19,254,.32); }
+.ra-result-grade { font-size: 24px; margin: 8px 0 2px; color: #f7fbff; text-shadow: 0 0 12px rgba(188,19,254,.45); }
+.ra-result-total { font-size: 19px; color: var(--cyber-yellow); margin-bottom: 9px; }
+.ra-r5-bonus { color: #ffe873; font-size: 14px; margin-top: 10px; text-shadow: 0 0 10px rgba(255,230,0,.35); }
+
+.ra-final-card { text-align: center; }
+.ra-final-grade {
+  font-size: 56px; font-weight: 900; letter-spacing: 4px;
+  text-shadow: 0 0 14px currentColor, 0 0 32px rgba(188,19,254,.38);
+  animation: ra-pulse 1.8s ease-in-out infinite;
+}
+.ra-final-total { font-size: 28px; color: var(--cyber-yellow); margin: 8px 0; }
+.ra-final-bonus { color: #baff9a; font-size: 13px; margin-top: 6px; }
+.ra-final-rounds { font-size: 13px; color: #d3dfff; margin-top: 12px; }
+@keyframes ra-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.04); opacity: 0.92; }
+}
 """
 
 
@@ -1024,17 +1163,15 @@ with gr.Blocks(title="RespondAI") as app:
         with gr.Column(visible=True, elem_classes=["game-panel"]) as screen_s1:
             with gr.Column(elem_classes=["screen-body"]):
                 gr.HTML("""
-<div style="display:flex;flex-direction:column;justify-content:center;align-items:center;
-            flex:1;min-height:200px;text-align:center;">
-  <div style="font-family:monospace;font-size:42px;font-weight:900;
-              color:#f4c430;letter-spacing:5px;">RespondAI</div>
-  <div style="color:#667;font-size:14px;margin-top:8px;">AI와 함께하는 즉흥 연주 세션</div>
+<div class="ra-title-wrap">
+  <div class="ra-logo">RespondAI</div>
+  <div class="ra-subtitle">AI와 함께하는 즉흥 연주 세션</div>
 </div>
 """)
             with gr.Row(equal_height=True, elem_classes=["screen-actions"]):
-                btn_piano_start  = gr.Button("🎹 피아노 모드 시작", variant="primary", scale=2)
+                btn_piano_start  = gr.Button("🎹 피아노 모드 시작", variant="primary", scale=2, elem_classes=["mode-card"])
                 btn_humming_start = gr.Button("🎤 허밍 모드 (Beta)", variant="secondary",
-                                              scale=1, interactive=False)
+                                              scale=1, interactive=False, elem_classes=["mode-card"])
 
         # ── S2: Round start ──────────────────────────────────────────────────
         with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s2:
@@ -1098,15 +1235,14 @@ with gr.Blocks(title="RespondAI") as app:
         rnd = st["round"]
         cond = ROUND_CONDITIONS[rnd]
         return f"""
-<div style="background:#0d0d2a;border-radius:10px;padding:20px 16px;text-align:center;color:#ccd;
-            margin:auto;max-width:520px;">
-  <div style="font-size:24px;font-weight:bold;color:#f4c430;margin-bottom:4px;">
+<div class="ra-round-card">
+  <div class="ra-round-title">
     Round {rnd} / {TOTAL_ROUNDS}
   </div>
-  <div style="font-size:17px;margin:8px 0;">
+  <div class="ra-round-meta">
     🎼 {st['key']} &nbsp;&nbsp; ♩ {st['bpm']} BPM
   </div>
-  <div style="font-size:14px;color:#9ab;margin-top:10px;font-style:italic;">
+  <div class="ra-round-cond">
     "{cond}"
   </div>
 </div>
