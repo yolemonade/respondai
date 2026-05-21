@@ -1,0 +1,1254 @@
+"""RespondAI — Phase 1 Gradio app (mock mode)."""
+from __future__ import annotations
+
+import copy
+import random
+from typing import List, Optional
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as _fm
+
+# Use a Korean-capable font if available, else fall back gracefully
+_KO_FONT = next(
+    (f.name for f in _fm.fontManager.ttflist
+     if "Nanum Gothic" in f.name or "Apple SD Gothic" in f.name),
+    None,
+)
+if _KO_FONT:
+    plt.rcParams["font.family"] = _KO_FONT
+import matplotlib.patches as mpatches
+import numpy as np
+import gradio as gr
+
+from data.tokenizer import Note
+from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
+from input.piano import temp_ai_response_for_testing, synth_notes
+
+# ─── Constants ───────────────────────────────────────────────────────────────
+
+MAX_EXCHANGES  = 3
+MAX_NOTES      = 16
+DEFAULT_DURATION = 2   # sixteenth-note steps per note slot
+TOTAL_ROUNDS   = 5
+AI_MODE        = "mock"
+
+SAMPLE_RATE    = 22050
+
+KEYS = [
+    "C major", "G major", "D major", "F major", "Bb major",
+    "A minor", "E minor", "D minor", "G minor", "B minor",
+]
+BPM_CHOICES = [70, 80, 90, 100, 110]
+
+KEY_TO_TOKEN = {
+    "C major": "C",  "G major": "G",  "D major": "D",  "F major": "F",
+    "Bb major": "A#","A minor": "Am", "E minor": "Em", "D minor": "Dm",
+    "G minor": "Gm", "B minor": "Bm",
+}
+
+ROUND_CONDITIONS = {
+    1: "자유롭게 연주하세요",
+    2: "AI의 멜로디에 호응해보세요",
+    3: "R1의 멜로디를 기억하나요?",
+    4: "리듬에 집중해보세요",
+    5: "처음 멜로디로 마무리해보세요",
+}
+
+EXCHANGE_STEPS = (MAX_NOTES * DEFAULT_DURATION) + 8   # x-width per exchange slot
+
+
+# ─── State helpers ───────────────────────────────────────────────────────────
+
+def init_state() -> dict:
+    return {
+        "screen": "S1",
+        "round": 1,
+        "exchange": 1,
+        "phase": "user_input",
+        "current_notes": [],
+        "ai_notes": [],
+        "exchange_log": [],   # [{user_notes, ai_notes, score}, ...]
+        "round_results": [],  # [{round_num, key, bpm, total, exchange_scores, grade}, ...]
+        "r1_motif": [],
+        "key": "C major",
+        "bpm": 90,
+        "mode": "piano",
+        "total_score": 0,
+    }
+
+
+def round_grade(score: int) -> str:
+    if score >= 950: return "⭐⭐⭐ PERFECT"
+    if score >= 800: return "⭐⭐ GREAT"
+    if score >= 600: return "⭐ CLEAR"
+    return "TRY AGAIN"
+
+
+# ─── Scoring ─────────────────────────────────────────────────────────────────
+
+def compute_exchange_score(
+    user_notes: List[Note],
+    ai_prev_notes: List[Note],
+    r1_motif: List[Note],
+    round_num: int,
+    exchange_num: int,
+    key_token: str,
+) -> dict:
+    """Compute per-exchange score according to prompt.md spec."""
+    if not user_notes:
+        return {
+            "key_consistency": 0, "rhythm_similarity": 0,
+            "motif_usage": 0, "creativity_bonus": 0,
+            "total": 0, "feedback": "빈 입력입니다.",
+            "raw": {"key_consistency": 0.0, "rhythm_pearson": 0.0, "motif_overlap": 0.0},
+        }
+
+    # R1/E1: auto 300 for rhythm + motif; only key computed
+    if round_num == 1 and exchange_num == 1:
+        kc = int(key_consistency(user_notes, key_token) * 300)
+        cb = 50
+        return {
+            "key_consistency": kc, "rhythm_similarity": 300,
+            "motif_usage": 300, "creativity_bonus": cb,
+            "total": kc + 300 + 300 + cb,
+            "feedback": "기준 모티프가 저장됐습니다!",
+            "raw": {"key_consistency": kc / 300, "rhythm_pearson": 1.0, "motif_overlap": 1.0},
+        }
+
+    # Rhythm: compare previous AI notes (or 300 auto if E1)
+    if exchange_num == 1 or not ai_prev_notes:
+        rhythm_score = 300
+        rhythm_raw = 1.0
+    else:
+        tmp = score_response(ai_prev_notes, user_notes, key_token)
+        rhythm_score = tmp["rhythm_similarity"]
+        rhythm_raw = tmp["raw"]["rhythm_pearson"]
+
+    # Key consistency and creativity: use ai_prev (or empty placeholder)
+    base = score_response(ai_prev_notes or user_notes, user_notes, key_token)
+    key_score = base["key_consistency"]
+    creativity = base["creativity_bonus"]
+
+    # Motif: compare against r1_motif (or ai_prev if no motif yet)
+    if r1_motif:
+        motif_res = score_response(r1_motif, user_notes, key_token)
+        motif_score = motif_res["motif_usage"]
+        motif_raw = motif_res["raw"]["motif_overlap"]
+    else:
+        motif_score = base["motif_usage"]
+        motif_raw = base["raw"]["motif_overlap"]
+
+    total = key_score + rhythm_score + motif_score + creativity
+
+    return {
+        "key_consistency": key_score,
+        "rhythm_similarity": rhythm_score,
+        "motif_usage": motif_score,
+        "creativity_bonus": creativity,
+        "total": total,
+        "feedback": base["feedback"],
+        "raw": {
+            "key_consistency": base["raw"]["key_consistency"],
+            "rhythm_pearson": rhythm_raw,
+            "motif_overlap": motif_raw,
+        },
+    }
+
+
+# ─── Audio ───────────────────────────────────────────────────────────────────
+
+def audio_duration_ms(audio: tuple) -> int:
+    """합성된 오디오 버퍼 실제 길이(ms) — synth_notes tail 포함."""
+    sr, samples = audio
+    n = len(samples)
+    if n <= 0:
+        return 800
+    return int(n / sr * 1000) + 350
+
+
+def estimate_playback_ms(user_notes: List[Note], ai_notes: List[Note], bpm: int) -> int:
+    """오디오 재생 길이 추정(ms) — audio_duration_ms 폴백용."""
+    step_sec = (60.0 / bpm) / 4.0
+    gap = 0.25
+    tail = 0.35  # synth_notes per-segment release
+
+    def _end(notes: List[Note], empty: float) -> float:
+        if not notes:
+            return empty
+        return max(n.end for n in notes) * step_sec + tail
+
+    sec = _end(user_notes, 0.35) + gap + _end(ai_notes, 0.35) + 0.15
+    return int(sec * 1000)
+
+
+def build_round_audio(
+    user_notes: List[Note],
+    ai_notes: List[Note],
+    bpm: int,
+) -> tuple:
+    """Return (sample_rate, int16_mono) for Gradio gr.Audio."""
+    gap = np.zeros(int(0.25 * SAMPLE_RATE), dtype=np.float32)
+    user_wav = synth_notes(user_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="user")
+    # [TEST / 임시] AI 오디오 — Phase 2에서 notes_to_wav()로 교체
+    ai_wav = synth_notes(ai_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="ai")
+    combined = np.concatenate([user_wav, gap, ai_wav])
+    peak = float(np.abs(combined).max())
+    if peak < 1e-8:
+        combined = gap
+        peak = float(np.abs(gap).max()) or 1.0
+    combined = (combined / peak * 0.92).astype(np.float32)
+    return (SAMPLE_RATE, (combined * 32767).astype(np.int16))
+
+
+# ─── Piano roll rendering ────────────────────────────────────────────────────
+
+def render_piano_roll(state: dict) -> plt.Figure:
+    plt.close("all")
+    fig, ax = plt.subplots(figsize=(8.5, 1.65))
+    fig.patch.set_facecolor("#1a1a2e")
+    ax.set_facecolor("#16213e")
+
+    pitch_lo, pitch_hi = 40, 90
+
+    # Draw exchange separator lines
+    for ex in range(MAX_EXCHANGES + 1):
+        x = ex * EXCHANGE_STEPS
+        ax.axvline(x, color="#444466", linewidth=0.8, linestyle="--")
+
+    # Exchange label backgrounds
+    for ex in range(MAX_EXCHANGES):
+        x = ex * EXCHANGE_STEPS
+        ax.text(x + EXCHANGE_STEPS / 2, pitch_hi - 1.5,
+                f"교환 {ex+1}", ha="center", va="top",
+                color="#888899", fontsize=7)
+
+    def draw_notes(notes, exchange_idx, color, alpha=0.85):
+        offset = exchange_idx * EXCHANGE_STEPS
+        for n in notes:
+            width = max(n.end - n.start, 1)
+            rect = mpatches.FancyBboxPatch(
+                (offset + n.start, n.pitch - 0.4), width, 0.8,
+                boxstyle="round,pad=0.1",
+                facecolor=color, edgecolor="white",
+                linewidth=0.5, alpha=alpha,
+                transform=ax.transData,
+            )
+            ax.add_patch(rect)
+
+    for i, entry in enumerate(state["exchange_log"]):
+        draw_notes(entry["user_notes"], i, "#4A9EF5")
+        draw_notes(entry["ai_notes"],   i, "#F55A4A")
+
+    # Current (unconfirmed) notes in current exchange slot
+    cur_ex_idx = state["exchange"] - 1
+    draw_notes(state["current_notes"], cur_ex_idx, "#4A9EF5", alpha=0.45)
+
+    ax.set_xlim(0, MAX_EXCHANGES * EXCHANGE_STEPS)
+    ax.set_ylim(pitch_lo, pitch_hi)
+    ax.set_xlabel("Step", color="#aaaacc", fontsize=8)
+    ax.set_ylabel("Pitch", color="#aaaacc", fontsize=8)
+    ax.tick_params(colors="#aaaacc", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#333355")
+
+    # Legend
+    user_patch = mpatches.Patch(color="#4A9EF5", label="플레이어")
+    ai_patch   = mpatches.Patch(color="#F55A4A", label="AI")
+    ax.legend(handles=[user_patch, ai_patch], loc="lower right",
+              facecolor="#1a1a2e", edgecolor="#555577",
+              labelcolor="white", fontsize=8)
+
+    fig.tight_layout(pad=0.5)
+    return fig
+
+
+def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
+    """Piano roll showing all rounds (for S4/S5)."""
+    plt.close("all")
+    fig, ax = plt.subplots(figsize=(8.5, 1.75))
+    fig.patch.set_facecolor("#1a1a2e")
+    ax.set_facecolor("#16213e")
+
+    pitch_lo, pitch_hi = 40, 90
+    round_width = MAX_EXCHANGES * EXCHANGE_STEPS + 16
+
+    for r_idx, rr in enumerate(round_results):
+        r_offset = r_idx * round_width
+        ax.axvline(r_offset, color="#666688", linewidth=1.2)
+        ax.text(r_offset + round_width / 2, pitch_hi - 1.5,
+                f"R{rr['round_num']}", ha="center", color="#aaaacc", fontsize=8)
+        for ex_idx, entry in enumerate(rr["exchange_log"]):
+            ex_offset = r_offset + ex_idx * EXCHANGE_STEPS
+            for n in entry["user_notes"]:
+                rect = mpatches.FancyBboxPatch(
+                    (ex_offset + n.start, n.pitch - 0.4), max(n.end - n.start, 1), 0.8,
+                    boxstyle="round,pad=0.1", facecolor="#4A9EF5",
+                    edgecolor="white", linewidth=0.4, alpha=0.85,
+                )
+                ax.add_patch(rect)
+            for n in entry["ai_notes"]:
+                rect = mpatches.FancyBboxPatch(
+                    (ex_offset + n.start, n.pitch - 0.4), max(n.end - n.start, 1), 0.8,
+                    boxstyle="round,pad=0.1", facecolor="#F55A4A",
+                    edgecolor="white", linewidth=0.4, alpha=0.85,
+                )
+                ax.add_patch(rect)
+
+    total_width = len(round_results) * round_width
+    ax.set_xlim(0, max(total_width, 1))
+    ax.set_ylim(pitch_lo, pitch_hi)
+    ax.tick_params(colors="#aaaacc", labelsize=7)
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#333355")
+    fig.tight_layout(pad=0.5)
+    return fig
+
+
+# ─── SVG energy visualization ─────────────────────────────────────────────────
+
+def render_energy_svg(notes: List[Note], role: str = "player") -> str:
+    """Simple circular energy visualization as SVG."""
+    cx, cy, r_base = 80, 80, 45
+    hue_lo = 240 if role == "player" else 40
+    hue_hi = 270 if role == "player" else 0
+
+    if not notes:
+        return (
+            f'<svg width="160" height="160" style="background:#0d0d1a;border-radius:50%;">'
+            f'<circle cx="{cx}" cy="{cy}" r="45" fill="none" '
+            f'stroke="{"#334" if role == "player" else "#433"}" stroke-width="2"/>'
+            f'<text x="{cx}" y="{cy+5}" text-anchor="middle" fill="#555" font-size="11">'
+            f'{"🎹" if role == "player" else "🤖"}</text></svg>'
+        )
+
+    slices = []
+    n = len(notes)
+    for i, note in enumerate(notes):
+        angle = (i / n) * 360
+        norm_pitch = max(0, min(1, (note.pitch - 40) / 50))
+        radius = r_base + norm_pitch * 25
+        hue = hue_lo + norm_pitch * (hue_hi - hue_lo)
+        sat = 70 + norm_pitch * 30
+        lightness = 50
+        # Draw spoke
+        rad = np.radians(angle)
+        x2 = cx + radius * np.cos(rad)
+        y2 = cy + radius * np.sin(rad)
+        slices.append(
+            f'<line x1="{cx}" y1="{cy}" x2="{x2:.1f}" y2="{y2:.1f}" '
+            f'stroke="hsl({hue:.0f},{sat:.0f}%,{lightness}%)" stroke-width="2.5" stroke-linecap="round"/>'
+        )
+
+    inner_r = r_base - 10
+    label = "🎹" if role == "player" else "🤖"
+    return (
+        f'<svg width="160" height="160" style="background:#0d0d1a;border-radius:50%;">'
+        + "".join(slices)
+        + f'<circle cx="{cx}" cy="{cy}" r="{inner_r}" fill="#0d0d1a" stroke="none"/>'
+        + f'<text x="{cx}" y="{cy+5}" text-anchor="middle" fill="#ccc" font-size="14">{label}</text>'
+        + f'</svg>'
+    )
+
+
+# ─── JS: elem_id nk-{midi} / btn-undo Gradio 버튼 클릭 ─────────────────────
+
+KEYBOARD_JS = """() => {
+  if (window.__respondAIKeyboardV === 3) return;
+  window.__respondAIKeyboardV = 3;
+
+  /* 물리 키(e.code) — 영문/한글 키보드 공통 */
+  const SEMI_BY_CODE = {
+    KeyA:0, KeyW:1, KeyS:2, KeyE:3, KeyD:4, KeyF:5, KeyT:6,
+    KeyG:7, KeyY:8, KeyH:9, KeyU:10, KeyJ:11, KeyK:12
+  };
+  /* e.key — 영문 */
+  const SEMI_BY_EN = {
+    a:0,w:1,s:2,e:3,d:4,f:5,t:6,g:7,y:8,h:9,u:10,j:11,k:12
+  };
+  /* e.key — 한글 2벌식(같은 자판 위치) */
+  const SEMI_BY_KO = {
+    'ㅁ':0,'ㅈ':1,'ㄴ':2,'ㄷ':3,'ㅇ':4,'ㄹ':5,'ㅌ':6,
+    'ㅎ':7,'ㅛ':8,'ㅅ':9,'ㅕ':10,'ㅑ':11,'ㅐ':12
+  };
+  let baseOctave = 4;
+  const activeKeys = new Set();
+
+  function semiFromEvent(e) {
+    if (SEMI_BY_CODE[e.code] !== undefined) return SEMI_BY_CODE[e.code];
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (SEMI_BY_EN[k] !== undefined) return SEMI_BY_EN[k];
+    if (SEMI_BY_KO[e.key] !== undefined) return SEMI_BY_KO[e.key];
+    return null;
+  }
+
+  function keyToken(e) {
+    return e.code || e.key;
+  }
+
+  function gradioBtn(id) {
+    const roots = [document];
+    document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
+      if (h.shadowRoot) roots.push(h.shadowRoot);
+    });
+    for (const root of roots) {
+      let el = root.getElementById(id);
+      if (!el) el = root.querySelector('[id="' + id + '"]');
+      if (!el) continue;
+      return el.tagName === 'BUTTON' ? el : el.querySelector('button');
+    }
+    return null;
+  }
+
+  let audioCtx = null;
+  function ensureAudioCtx() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  function playPreviewTone(midi) {
+    if (midi < 21 || midi > 108) return;
+    try {
+      const ctx = ensureAudioCtx();
+      const freq = 440 * Math.pow(2, (midi - 69) / 12);
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const t0 = ctx.currentTime;
+      const dur = 0.22;
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(0.32, t0 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.04);
+    } catch (_) {}
+  }
+
+  function sendNote(midi) {
+    if (midi === -1) {
+      const u = gradioBtn('btn-undo');
+      if (u) u.click();
+      return;
+    }
+    playPreviewTone(midi);
+    const btn = gradioBtn('nk-' + midi);
+    if (btn) btn.click();
+    else console.warn('[RespondAI] nk-' + midi + ' missing');
+  }
+
+  function flashKey(midi) {
+    const kEl = document.querySelector('[data-midi="' + midi + '"]');
+    if (!kEl) return;
+    const orig = kEl.style.background;
+    kEl.style.background = '#ffe066';
+    setTimeout(() => { kEl.style.background = orig; }, 130);
+  }
+
+  function clickConfirm() {
+    const btn = gradioBtn('btn-confirm');
+    if (btn && !btn.disabled) btn.click();
+  }
+
+  window.respondAI = { sendNote, flashKey };
+
+  document.addEventListener('mousedown', function(e) {
+    const key = e.target.closest && e.target.closest('[data-midi]');
+    if (!key || !key.dataset.midi) return;
+    e.preventDefault();
+    const midi = parseInt(key.dataset.midi, 10);
+    if (!isNaN(midi)) { sendNote(midi); flashKey(midi); }
+  }, true);
+
+  function isGameKey(e) {
+    if (e.key === 'Enter' || e.key === 'Backspace') return true;
+    if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return true;
+    return semiFromEvent(e) !== null;
+  }
+
+  window.addEventListener('keydown', function(e) {
+    if (!isGameKey(e)) return;
+    if (e.repeat) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.shiftKey && e.key === 'ArrowUp') {
+      baseOctave = Math.min(baseOctave + 1, 7);
+      const d = document.getElementById('oct-display');
+      if (d) d.textContent = baseOctave;
+      return;
+    }
+    if (e.shiftKey && e.key === 'ArrowDown') {
+      baseOctave = Math.max(baseOctave - 1, 0);
+      const d = document.getElementById('oct-display');
+      if (d) d.textContent = baseOctave;
+      return;
+    }
+    if (e.key === 'Backspace') { sendNote(-1); return; }
+    if (e.key === 'Enter') { clickConfirm(); return; }
+    const semi = semiFromEvent(e);
+    const tok = keyToken(e);
+    if (semi !== null && !activeKeys.has(tok)) {
+      activeKeys.add(tok);
+      let midi = semi === 12 ? (baseOctave + 2) * 12 : (baseOctave + 1) * 12 + semi;
+      midi = Math.max(60, Math.min(71, midi));
+      sendNote(midi);
+      flashKey(midi);
+    }
+  }, true);
+
+  window.addEventListener('keyup', function(e) {
+    activeKeys.delete(keyToken(e));
+  }, true);
+
+  console.log('[RespondAI] keyboard ready');
+}"""
+
+STOP_AUDIO_JS = """() => {
+  document.querySelectorAll('audio').forEach(a => {
+    try { a.pause(); a.currentTime = 0; } catch (_) {}
+  });
+}"""
+
+PLAY_EXCHANGE_FROM_START_JS = """() => {
+  function findExchangeAudio() {
+    const roots = [document];
+    document.querySelectorAll('gradio-app, .gradio-container').forEach((h) => {
+      if (h.shadowRoot) roots.push(h.shadowRoot);
+    });
+    for (const root of roots) {
+      const host = root.getElementById('s3-exchange-audio')
+        || root.querySelector('#s3-exchange-audio');
+      if (host) {
+        const a = host.tagName === 'AUDIO' ? host : host.querySelector('audio');
+        if (a) return a;
+      }
+    }
+    return null;
+  }
+  const audio = findExchangeAudio();
+  if (!audio) return;
+  const start = () => {
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.play().catch(() => {});
+    } catch (_) {}
+  };
+  if (audio.readyState >= 2) start();
+  else audio.addEventListener('loadeddata', start, { once: true });
+}"""
+
+FOCUS_GAME_JS = """() => {
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+}"""
+
+
+# ─── Piano keyboard HTML (pure HTML/CSS, NO <script> — onclick calls window.respondAI) ──
+
+def render_piano_html(base_octave: int = 4) -> str:
+    WHITE_SEMIS   = [0, 2, 4, 5, 7, 9, 11]
+    BLACK_OFFSETS = [(0,1),(1,3),(3,6),(4,8),(5,10)]  # (white_key_idx_in_oct, semitone)
+    NOTE_NAMES    = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+    OCTAVES = 1
+    WW, WH = 34, 72   # white key width / height (compact)
+    BW, BH = 20, 44   # black key width / height
+    total_w = OCTAVES * 7 * WW
+
+    whites, blacks = [], []
+
+    for oct in range(OCTAVES):
+        for wi, semi in enumerate(WHITE_SEMIS):
+            midi  = (base_octave + oct + 1) * 12 + semi
+            name  = NOTE_NAMES[semi] + str(base_octave + oct)
+            left  = (oct * 7 + wi) * WW
+            whites.append(
+                f'<div data-midi="{midi}"'
+                f' style="position:absolute;left:{left}px;width:{WW-2}px;height:{WH}px;'
+                f'background:#ececec;border:1px solid #666;border-radius:0 0 4px 4px;'
+                f'cursor:pointer;display:flex;align-items:flex-end;justify-content:center;'
+                f'padding-bottom:3px;box-sizing:border-box;">'
+                f'<span style="font-size:8px;color:#999;pointer-events:none;">{name}</span>'
+                f'</div>'
+            )
+        for wi, semi in BLACK_OFFSETS:
+            midi = (base_octave + oct + 1) * 12 + semi
+            left = (oct * 7 + wi + 1) * WW - BW // 2 - 1
+            blacks.append(
+                f'<div data-midi="{midi}"'
+                f' style="position:absolute;left:{left}px;top:0;width:{BW}px;height:{BH}px;'
+                f'background:#1a1a1a;border:1px solid #000;border-radius:0 0 3px 3px;'
+                f'cursor:pointer;z-index:2;">'
+                f'</div>'
+            )
+
+    return (
+        f'<div style="user-select:none;padding:10px 0;background:#111122;'
+        f'border-radius:8px;text-align:center;">'
+        f'<div style="color:#667;font-size:11px;margin-bottom:6px;">'
+        f'옥타브 <span id="oct-display">{base_octave}</span>'
+        f' &nbsp;|&nbsp;'
+        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">Shift+↑↓</kbd> 옥타브'
+        f' &nbsp;'
+        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">a-k</kbd> 또는 '
+        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">ㅁ~ㅐ</kbd> 건반 (입력 시 소리)'
+        f'</div>'
+        f'<div style="display:inline-block;position:relative;width:{total_w}px;height:{WH}px;">'
+        + ''.join(whites)
+        + ''.join(blacks)
+        + '</div></div>'
+    )
+
+
+# ─── HUD / info HTML helpers ─────────────────────────────────────────────────
+
+def hud_html(state: dict) -> str:
+    phase = state["phase"]
+    phase_label = "🎵 당신의 차례" if phase == "user_input" else "🤖 AI 응답 중..."
+    phase_color = "#4af" if phase == "user_input" else "#f84"
+    return f"""
+<div style="background:#0d0d2a;border-radius:8px;padding:10px 18px;
+            display:flex;align-items:center;justify-content:space-between;
+            font-family:monospace;color:#ccd;">
+  <div>
+    <span style="font-size:18px;font-weight:bold;">R{state['round']}/5</span>
+    <span style="margin-left:12px;color:#aab;">교환 {state['exchange']}/{MAX_EXCHANGES}</span>
+  </div>
+  <div>
+    <span style="background:#1a1a3e;padding:3px 8px;border-radius:4px;margin-right:8px;">
+      🎼 {state['key']}
+    </span>
+    <span style="background:#1a1a3e;padding:3px 8px;border-radius:4px;">
+      ♩ {state['bpm']} BPM
+    </span>
+  </div>
+  <div>
+    <span style="font-size:20px;font-weight:bold;color:#f4c430;">
+      {state['total_score']} pts
+    </span>
+  </div>
+  <div style="color:{phase_color};font-weight:bold;">{phase_label}</div>
+</div>
+"""
+
+
+def note_list_html(notes: List[Note]) -> str:
+    if not notes:
+        return '<div style="color:#556;font-size:12px;padding:6px;">노트 없음 — 건반을 눌러 입력하세요</div>'
+    NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+    names = [f"{NOTE_NAMES[n.pitch % 12]}{n.pitch // 12 - 1}" for n in notes]
+    items = "".join(
+        f'<span style="background:#1a2a4a;border:1px solid #335;border-radius:4px;'
+        f'padding:2px 6px;margin:2px;font-size:12px;color:#8af;">{name}</span>'
+        for name in names
+    )
+    return (
+        f'<div style="display:flex;flex-wrap:wrap;padding:4px;">'
+        f'{items}'
+        f'<span style="color:#556;font-size:11px;margin:4px;">{len(notes)}/{MAX_NOTES}</span>'
+        f'</div>'
+    )
+
+
+def score_bar_html(label: str, value: int, max_val: int, color: str) -> str:
+    pct = min(100, int(value / max_val * 100))
+    return f"""
+<div style="margin:4px 0;">
+  <div style="display:flex;justify-content:space-between;font-size:12px;color:#aab;margin-bottom:2px;">
+    <span>{label}</span><span>{value}/{max_val}</span>
+  </div>
+  <div style="background:#1a1a3e;border-radius:4px;height:10px;">
+    <div style="background:{color};width:{pct}%;height:10px;border-radius:4px;transition:width .4s;"></div>
+  </div>
+</div>
+"""
+
+
+def s4_html(state: dict) -> str:
+    results = state["round_results"]
+    if not results:
+        return ""
+    rr = results[-1]
+    exs = rr["exchange_scores"]
+    round_total = int(sum(s["total"] for s in exs) / len(exs))
+    grade = round_grade(round_total)
+
+    bars = (
+        score_bar_html("조성 일관성", exs[-1]["key_consistency"],  300, "#4A9EF5")
+        + score_bar_html("리듬 유사도",  exs[-1]["rhythm_similarity"],300, "#9b59b6")
+        + score_bar_html("모티프 활용",  exs[-1]["motif_usage"],     300, "#2ecc71")
+        + score_bar_html("창의성 보너스",exs[-1]["creativity_bonus"],100, "#f39c12")
+    )
+    r5_bonus = ""
+    if rr["round_num"] == 5 and rr.get("r5_motif_bonus"):
+        r5_bonus = '<div style="color:#ffd700;font-size:14px;margin-top:8px;">🌟 R5 모티프 보너스 +150점!</div>'
+
+    feedback = exs[-1].get("feedback", "")
+    return f"""
+<div style="background:#0d0d2a;border-radius:10px;padding:14px 16px;color:#ccd;">
+  <h2 style="margin:0 0 4px;color:#fff;font-size:18px;">Round {rr['round_num']} 결과</h2>
+  <div style="font-size:22px;margin:4px 0;">{grade}</div>
+  <div style="font-size:18px;color:#f4c430;margin-bottom:8px;">{round_total} / 1000</div>
+  <div style="color:#8af;font-size:13px;margin-bottom:12px;font-style:italic;">"{feedback}"</div>
+  {bars}
+  {r5_bonus}
+</div>
+"""
+
+
+def s5_html(state: dict) -> str:
+    round_results = state["round_results"]
+    if not round_results:
+        return ""
+
+    # Compute final score
+    # Collect per-round average scores for session_summary
+    per_round_scores = []
+    r5_motif_bonus = 0
+    for rr in round_results:
+        exs = rr["exchange_scores"]
+        avg_total = int(sum(s["total"] for s in exs) / len(exs))
+        # Rebuild a summary-compatible dict (scoring.session_summary takes list of exchange dicts)
+        # We use the last exchange score as representative
+        per_round_scores.append({**exs[-1], "total": avg_total})
+
+    summary = session_summary(per_round_scores)
+
+    # Add R5 motif bonus if applicable
+    if round_results[-1].get("r5_motif_bonus"):
+        r5_motif_bonus = 150
+
+    final_total = summary["total"] + r5_motif_bonus
+    grade = grade_from_total(final_total)
+
+    grade_colors = {"S": "#ffd700", "A": "#c0c0c0", "B": "#cd7f32", "C": "#aaaaaa"}
+    gc = grade_colors.get(grade, "#fff")
+
+    round_grades_html = " | ".join(
+        f"R{rr['round_num']} {round_grade(int(sum(s['total'] for s in rr['exchange_scores'])/len(rr['exchange_scores'])))}"
+        for rr in round_results
+    )
+
+    bonus_detail = ""
+    if summary["bonus_score"] or r5_motif_bonus:
+        bonus_detail = (
+            f'<div style="color:#8f8;font-size:13px;margin-top:6px;">'
+            f'콤보/조성 보너스: +{summary["bonus_score"]} &nbsp; '
+            f'R5 모티프 보너스: +{r5_motif_bonus}'
+            f'</div>'
+        )
+
+    return f"""
+<div style="background:#0d0d2a;border-radius:10px;padding:16px;color:#ccd;text-align:center;">
+  <div style="font-size:52px;font-weight:900;color:{gc};letter-spacing:4px;">{grade}</div>
+  <div style="font-size:26px;color:#f4c430;margin:6px 0;">{final_total} / 5000</div>
+  {bonus_detail}
+  <div style="font-size:13px;color:#889;margin-top:12px;">{round_grades_html}</div>
+</div>
+"""
+
+
+# ─── CSS ─────────────────────────────────────────────────────────────────────
+
+APP_CSS = """
+html, body {
+  height: 100% !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  background: #0a0a1a !important;
+}
+.gradio-container {
+  max-width: 1000px !important;
+  width: 100% !important;
+  height: 100vh !important;
+  max-height: 100vh !important;
+  margin: 0 auto !important;
+  padding: 6px 10px 8px !important;
+  overflow: hidden !important;
+  box-sizing: border-box !important;
+}
+footer, .footer { display: none !important; }
+#main, .app {
+  height: 100% !important;
+  overflow: hidden !important;
+}
+
+/* 건반 브리지: 화면 레이아웃에 안 보이게 (DOM·클릭은 유지) */
+.note-input-layer {
+  height: 0 !important;
+  max-height: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  opacity: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  pointer-events: none !important;
+}
+.note-input-layer * { pointer-events: auto !important; }
+
+/* 항상 visible인 컨테이너 — 자식 패널만 .hide 토글 (Gradio 6 중첩 Column 버그 회피) */
+.game-stage {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  overflow: hidden !important;
+}
+.game-panel {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  display: flex !important;
+  flex-direction: column !important;
+  justify-content: space-between !important;
+  box-sizing: border-box !important;
+  overflow: hidden !important;
+  padding: 4px 2px 8px !important;
+}
+.game-stage > .hide {
+  display: none !important;
+}
+.screen-body {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+}
+.screen-actions, .quick-notes {
+  flex: 0 0 auto !important;
+  flex-shrink: 0 !important;
+  padding-top: 4px !important;
+}
+.screen-actions:last-of-type { margin-top: 0 !important; }
+.quick-notes button { min-width: 1.8rem !important; padding: 3px 4px !important; font-size: 11px !important; }
+
+/* S3: 피아노롤만 넓게, 사이드 viz 숨김 */
+.s3-main .viz-side { display: none !important; }
+.s3-main .piano-roll-host { flex: 1 1 auto !important; min-width: 0 !important; }
+.s3-main .piano-roll-host .plot-container,
+.s3-main .piano-roll-host canvas {
+  max-height: 150px !important;
+  height: 150px !important;
+}
+.game-panel .plot-container,
+.game-panel .piano-roll-host canvas {
+  max-height: 140px !important;
+}
+
+.gradio-button { white-space: nowrap !important; }
+"""
+
+
+# ─── Gradio app ──────────────────────────────────────────────────────────────
+
+def _vis(v: bool):
+    return gr.update(visible=v)
+
+
+def _stop_audio():
+    """AI 재생 종료 — 내 턴으로 돌아올 때 이전 오디오가 반복되지 않게."""
+    return gr.update(value=None, visible=False, autoplay=False)
+
+
+def _screens(*visible_ids):
+    """Return visibility updates for [s1,s2,s3,s4,s5] in order."""
+    ids = ["S1", "S2", "S3", "S4", "S5"]
+    return tuple(gr.update(visible=(sid in visible_ids)) for sid in ids)
+
+
+with gr.Blocks(title="RespondAI") as app:
+    state = gr.State(init_state())
+
+    with gr.Column(visible=True, elem_classes=["game-stage"]):
+        # ── S1: Title ────────────────────────────────────────────────────────
+        with gr.Column(visible=True, elem_classes=["game-panel"]) as screen_s1:
+            with gr.Column(elem_classes=["screen-body"]):
+                gr.HTML("""
+<div style="display:flex;flex-direction:column;justify-content:center;align-items:center;
+            flex:1;min-height:200px;text-align:center;">
+  <div style="font-family:monospace;font-size:42px;font-weight:900;
+              color:#f4c430;letter-spacing:5px;">RespondAI</div>
+  <div style="color:#667;font-size:14px;margin-top:8px;">AI와 함께하는 즉흥 연주 세션</div>
+</div>
+""")
+            with gr.Row(equal_height=True, elem_classes=["screen-actions"]):
+                btn_piano_start  = gr.Button("🎹 피아노 모드 시작", variant="primary", scale=2)
+                btn_humming_start = gr.Button("🎤 허밍 모드 (Beta)", variant="secondary",
+                                              scale=1, interactive=False)
+
+        # ── S2: Round start ──────────────────────────────────────────────────
+        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s2:
+            with gr.Column(elem_classes=["screen-body"]):
+                s2_info = gr.HTML()
+            with gr.Row(elem_classes=["screen-actions"]):
+                btn_round_start = gr.Button("▶ 시작", variant="primary")
+
+        # ── S3: Main game ────────────────────────────────────────────────────
+        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s3:
+            with gr.Column(elem_classes=["screen-body", "s3-main"]):
+                s3_hud_html  = gr.HTML()
+                with gr.Row():
+                    s3_viz_player = gr.HTML(render_energy_svg([], "player"), elem_classes=["viz-side"])
+                    with gr.Column(elem_classes=["piano-roll-host"]):
+                        s3_roll = gr.Plot(show_label=False)
+                    s3_viz_ai = gr.HTML(render_energy_svg([], "ai"), elem_classes=["viz-side"])
+                s3_piano     = gr.HTML(render_piano_html(4))
+                s3_note_list = gr.HTML(note_list_html([]))
+                s3_audio     = gr.Audio(label="", autoplay=True, visible=False, elem_id="s3-exchange-audio")
+            with gr.Row(elem_classes=["screen-actions"]):
+                btn_cancel   = gr.Button("← 취소", scale=1)
+                btn_preview  = gr.Button("▶ 미리듣기", scale=1)
+                btn_confirm  = gr.Button("✅ 확정 (Enter)", scale=2, variant="primary", elem_id="btn-confirm")
+
+        # ── S4: Round result ─────────────────────────────────────────────────
+        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s4:
+            with gr.Column(elem_classes=["screen-body"]):
+                s4_result_html = gr.HTML()
+                with gr.Column(elem_classes=["piano-roll-host"]):
+                    s4_roll = gr.Plot(show_label=False)
+            with gr.Row(elem_classes=["screen-actions"]):
+                btn_next_round = gr.Button("다음 라운드 →", variant="primary")
+
+        # ── S5: Final result ─────────────────────────────────────────────────
+        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s5:
+            with gr.Column(elem_classes=["screen-body"]):
+                s5_result_html = gr.HTML()
+                with gr.Column(elem_classes=["piano-roll-host"]):
+                    s5_roll = gr.Plot(show_label=False)
+            with gr.Row(elem_classes=["screen-actions"]):
+                btn_restart = gr.Button("🔄 다시하기", variant="secondary")
+
+    # 건반 브리지 (Blocks 맨 끝 + 화면 밖 배치)
+    with gr.Row(elem_classes=["note-input-layer"]):
+        btn_undo = gr.Button("⌫", elem_id="btn-undo")
+        nk_c  = gr.Button("C",  elem_id="nk-60")
+        nk_cs = gr.Button("C#", elem_id="nk-61")
+        nk_d  = gr.Button("D",  elem_id="nk-62")
+        nk_ds = gr.Button("D#", elem_id="nk-63")
+        nk_e  = gr.Button("E",  elem_id="nk-64")
+        nk_f  = gr.Button("F",  elem_id="nk-65")
+        nk_fs = gr.Button("F#", elem_id="nk-66")
+        nk_g  = gr.Button("G",  elem_id="nk-67")
+        nk_gs = gr.Button("G#", elem_id="nk-68")
+        nk_a  = gr.Button("A",  elem_id="nk-69")
+        nk_as = gr.Button("A#", elem_id="nk-70")
+        nk_b  = gr.Button("B",  elem_id="nk-71")
+    _note_btn_map = [
+        (60, nk_c), (61, nk_cs), (62, nk_d), (63, nk_ds), (64, nk_e), (65, nk_f),
+        (66, nk_fs), (67, nk_g), (68, nk_gs), (69, nk_a), (70, nk_as), (71, nk_b),
+    ]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Callbacks
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _s2_info_html(st: dict) -> str:
+        rnd = st["round"]
+        cond = ROUND_CONDITIONS[rnd]
+        return f"""
+<div style="background:#0d0d2a;border-radius:10px;padding:20px 16px;text-align:center;color:#ccd;
+            margin:auto;max-width:520px;">
+  <div style="font-size:24px;font-weight:bold;color:#f4c430;margin-bottom:4px;">
+    Round {rnd} / {TOTAL_ROUNDS}
+  </div>
+  <div style="font-size:17px;margin:8px 0;">
+    🎼 {st['key']} &nbsp;&nbsp; ♩ {st['bpm']} BPM
+  </div>
+  <div style="font-size:14px;color:#9ab;margin-top:10px;font-style:italic;">
+    "{cond}"
+  </div>
+</div>
+"""
+
+    # S1 → S2
+    def on_piano_start(st):
+        st = init_state()
+        st["mode"] = "piano"
+        st["key"]  = random.choice(KEYS)
+        st["bpm"]  = random.choice(BPM_CHOICES)
+        return (
+            st,
+            _s2_info_html(st),
+            *_screens("S2"),
+        )
+
+    btn_piano_start.click(
+        on_piano_start, inputs=[state],
+        outputs=[state, s2_info, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    )
+
+    # S2 → S3 (Gradio 6: 자식 갱신이 부모 visible을 덮어씀 → 2단계 체인)
+    def on_round_start_state(st):
+        st["exchange"]      = 1
+        st["phase"]         = "user_input"
+        st["current_notes"] = []
+        st["ai_notes"]      = []
+        st["exchange_log"]  = []
+        return st, *_screens("S3")
+
+    def on_round_start_ui(st):
+        return (
+            hud_html(st),
+            render_piano_roll(st),
+            render_energy_svg([], "player"),
+            render_energy_svg([], "ai"),
+            note_list_html([]),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            _stop_audio(),
+            *_screens("S3"),
+        )
+
+    round_start_chain = btn_round_start.click(
+        on_round_start_state, inputs=[state],
+        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    ).then(
+        on_round_start_ui, inputs=[state],
+        outputs=[s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
+                 btn_confirm, btn_cancel, s3_audio,
+                 screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    )
+    round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
+
+    def on_note_event(midi: int, st: dict):
+        if st["phase"] != "user_input":
+            return st, render_piano_roll(st), note_list_html(st["current_notes"])
+
+        if midi == -1:
+            if st["current_notes"]:
+                st["current_notes"] = st["current_notes"][:-1]
+        elif 21 <= midi <= 108:
+            if len(st["current_notes"]) < MAX_NOTES:
+                i = len(st["current_notes"])
+                st["current_notes"] = st["current_notes"] + [
+                    Note(midi, i * DEFAULT_DURATION, (i + 1) * DEFAULT_DURATION)
+                ]
+
+        return st, render_piano_roll(st), note_list_html(st["current_notes"])
+
+    btn_undo.click(
+        lambda st: on_note_event(-1, st), inputs=[state],
+        outputs=[state, s3_roll, s3_note_list],
+    )
+    for midi, btn in _note_btn_map:
+        btn.click(
+            lambda st, m=midi: on_note_event(m, st),
+            inputs=[state],
+            outputs=[state, s3_roll, s3_note_list],
+        )
+
+    # Cancel last note
+    def on_cancel(st):
+        if st["phase"] == "user_input" and st["current_notes"]:
+            st["current_notes"] = st["current_notes"][:-1]
+        return st, render_piano_roll(st), note_list_html(st["current_notes"])
+
+    btn_cancel.click(on_cancel, inputs=[state],
+                     outputs=[state, s3_roll, s3_note_list])
+
+    # Preview (play current notes)
+    def on_preview(st):
+        audio = build_round_audio(st["current_notes"], [], st["bpm"])
+        return gr.update(value=audio, visible=True)
+
+    btn_preview.click(on_preview, inputs=[state], outputs=[s3_audio])
+
+    # Confirm notes → AI response → score
+    def on_confirm(st):
+        if st["phase"] != "user_input":
+            return (st, render_piano_roll(st), note_list_html([]),
+                    hud_html(st),
+                    render_energy_svg(st["current_notes"], "player"),
+                    render_energy_svg([], "ai"),
+                    gr.update(), gr.update(interactive=False))
+
+        user_notes = list(st["current_notes"])
+        # [TEST / 임시] Phase 1 UI 테스트용 AI — 빈 입력 시 고정 멜로디, 있으면 옥타브+12
+        # Phase 2: generate() 결과의 response_notes로 교체
+        ai_notes = temp_ai_response_for_testing(user_notes)
+
+        key_token  = KEY_TO_TOKEN[st["key"]]
+        score      = compute_exchange_score(
+            user_notes, st["ai_notes"], st["r1_motif"],
+            st["round"], st["exchange"], key_token,
+        )
+
+        if st["round"] == 1 and st["exchange"] == 1 and user_notes:
+            st["r1_motif"] = user_notes
+
+        st["exchange_log"] = st["exchange_log"] + [{
+            "user_notes": user_notes,
+            "ai_notes":   ai_notes,
+            "score":      score,
+        }]
+        st["ai_notes"]      = ai_notes
+        st["current_notes"] = []
+        st["phase"]         = "ai_response"
+        audio = build_round_audio(user_notes, ai_notes, st["bpm"])
+        st["_playback_ms"] = audio_duration_ms(audio)
+        fig   = render_piano_roll(st)
+
+        return (
+            st,
+            fig,
+            note_list_html([]),
+            hud_html(st),
+            render_energy_svg(user_notes, "player"),
+            render_energy_svg(ai_notes,   "ai"),
+            gr.update(interactive=False),
+            gr.update(),  # s3_audio — 다음 단계에서 로드
+        )
+
+    def on_confirm_audio(st):
+        """오디오만 별도 전송(Plot 렌더 후 로드 지연 → 끝만 재생되는 현상 방지)."""
+        if st["phase"] != "ai_response" or not st["exchange_log"]:
+            return st, gr.update()
+        last = st["exchange_log"][-1]
+        audio = build_round_audio(last["user_notes"], last["ai_notes"], st["bpm"])
+        st["_playback_ms"] = audio_duration_ms(audio)
+        return st, gr.update(value=audio, visible=True, autoplay=True)
+
+    _continue_screen_outputs = [state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5]
+    _continue_ui_outputs = [
+        s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
+        btn_confirm, s3_audio, s4_result_html, s4_roll,
+        screen_s1, screen_s2, screen_s3, screen_s4, screen_s5,
+    ]
+
+    def wait_for_playback(st: dict):
+        import time
+        ms = int(st.get("_playback_ms", 3000))
+        time.sleep(max(1.2, ms / 1000.0 * 1.25 + 0.5))
+        return st
+
+    def on_continue_state(st):
+        exs = st["exchange_log"]
+        if st["exchange"] < MAX_EXCHANGES:
+            st["exchange"] += 1
+            st["phase"] = "user_input"
+            return st, *_screens("S3")
+
+        exchange_scores = [e["score"] for e in exs]
+        round_total = int(sum(s["total"] for s in exchange_scores) / len(exchange_scores))
+        r5_bonus = False
+        if st["round"] == TOTAL_ROUNDS and st["r1_motif"]:
+            last_motif_raw = exchange_scores[-1]["raw"]["motif_overlap"]
+            r5_bonus = last_motif_raw >= 0.5
+        if r5_bonus:
+            round_total += 150
+
+        st["round_results"] = st["round_results"] + [{
+            "round_num": st["round"],
+            "key": st["key"],
+            "bpm": st["bpm"],
+            "total": round_total,
+            "exchange_scores": exchange_scores,
+            "exchange_log": list(exs),
+            "r5_motif_bonus": r5_bonus,
+        }]
+        st["total_score"] += round_total
+        st["phase"] = "round_result"
+        return st, *_screens("S4")
+
+    def on_continue_ui(st):
+        if st["phase"] == "user_input":
+            return (
+                hud_html(st),
+                render_piano_roll(st),
+                render_energy_svg([], "player"),
+                render_energy_svg(st["ai_notes"], "ai"),
+                note_list_html([]),
+                gr.update(interactive=True),
+                _stop_audio(),
+                gr.update(), gr.update(),
+                *_screens("S3"),
+            )
+        return (
+            hud_html(st),
+            render_piano_roll(st),
+            render_energy_svg([], "player"),
+            render_energy_svg([], "ai"),
+            note_list_html([]),
+            gr.update(interactive=False),
+            _stop_audio(),
+            s4_html(st),
+            render_full_history_roll(st["round_results"]),
+            *_screens("S4"),
+        )
+
+    confirm_evt = btn_confirm.click(
+        on_confirm, inputs=[state],
+        outputs=[state, s3_roll, s3_note_list, s3_hud_html,
+                 s3_viz_player, s3_viz_ai, btn_confirm, s3_audio],
+    )
+    confirm_evt = confirm_evt.then(on_confirm_audio, inputs=[state], outputs=[state, s3_audio])
+    continue_chain = confirm_evt.then(
+        wait_for_playback, inputs=[state], outputs=[state], js=PLAY_EXCHANGE_FROM_START_JS,
+    )
+    continue_chain = continue_chain.then(on_continue_state, inputs=[state], outputs=_continue_screen_outputs)
+    continue_chain = continue_chain.then(on_continue_ui, inputs=[state], outputs=_continue_ui_outputs)
+    continue_chain.then(fn=None, js=FOCUS_GAME_JS)
+
+    def on_next_round_state(st):
+        if st["round"] >= TOTAL_ROUNDS:
+            st["phase"] = "game_over"
+            return st, *_screens("S5")
+        st["round"] += 1
+        st["exchange"] = 1
+        st["exchange_log"] = []
+        st["ai_notes"] = []
+        st["current_notes"] = []
+        st["phase"] = "user_input"
+        st["key"] = random.choice(KEYS)
+        st["bpm"] = random.choice(BPM_CHOICES)
+        return st, *_screens("S2")
+
+    def on_next_round_ui(st):
+        if st["phase"] == "game_over":
+            return (
+                gr.update(),
+                s5_html(st),
+                render_full_history_roll(st["round_results"]),
+                *_screens("S5"),
+            )
+        return (
+            _s2_info_html(st),
+            gr.update(),
+            gr.update(),
+            *_screens("S2"),
+        )
+
+    btn_next_round.click(
+        on_next_round_state, inputs=[state],
+        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    ).then(
+        on_next_round_ui, inputs=[state],
+        outputs=[s2_info, s5_result_html, s5_roll,
+                 screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    )
+
+    # Restart → S1
+    def on_restart(_st):
+        return (
+            init_state(),
+            *_screens("S1"),
+        )
+
+    btn_restart.click(
+        on_restart, inputs=[state],
+        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    )
+
+    app.load(fn=None, js=KEYBOARD_JS)
+
+
+if __name__ == "__main__":
+    app.launch(share=False, css=APP_CSS, js=KEYBOARD_JS)
