@@ -541,32 +541,52 @@ KEYBOARD_JS = """() => {
   }
 
   let audioCtx = null;
+  let masterGain = null;
   function ensureAudioCtx() {
     if (!audioCtx) {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = 0.9;
+      masterGain.connect(audioCtx.destination);
     }
-    if (audioCtx.state === 'suspended') audioCtx.resume();
+    if (audioCtx.state === 'suspended') {
+      try { audioCtx.resume(); } catch (_) {}
+    }
     return audioCtx;
+  }
+
+  function unlockAudio() {
+    try {
+      const ctx = ensureAudioCtx();
+      if (ctx.state === 'suspended') ctx.resume();
+    } catch (_) {}
   }
 
   function playPreviewTone(midi) {
     if (midi < 21 || midi > 108) return;
     try {
       const ctx = ensureAudioCtx();
+      if (!ctx || !masterGain) return;
       const freq = 440 * Math.pow(2, (midi - 69) / 12);
       const osc = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
       const t0 = ctx.currentTime;
-      const dur = 0.22;
+      const dur = 0.26;
       osc.type = 'triangle';
+      osc2.type = 'sine';
       osc.frequency.value = freq;
+      osc2.frequency.value = freq * 2;
       gain.gain.setValueAtTime(0.0001, t0);
-      gain.gain.exponentialRampToValueAtTime(0.32, t0 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.55, t0 + 0.012);
       gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      osc2.connect(gain);
+      gain.connect(masterGain);
       osc.start(t0);
+      osc2.start(t0);
       osc.stop(t0 + dur + 0.04);
+      osc2.stop(t0 + dur + 0.04);
     } catch (_) {}
   }
 
@@ -595,6 +615,9 @@ KEYBOARD_JS = """() => {
   }
 
   window.respondAI = { sendNote, flashKey };
+
+  window.addEventListener('pointerdown', unlockAudio, { capture: true });
+  window.addEventListener('touchstart', unlockAudio, { capture: true });
 
   document.addEventListener('mousedown', function(e) {
     if (isInputLocked()) return;
@@ -905,10 +928,10 @@ APP_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Press+Start+2P&display=swap');
 
 :root {
-  --bg-0: #0d0e15;
-  --bg-1: #12131c;
-  --panel: rgba(18, 20, 34, 0.86);
-  --line: rgba(188, 19, 254, 0.44);
+  --bg-0: #07080f;
+  --bg-1: #0d0e18;
+  --panel: rgba(13, 15, 28, 0.92);
+  --line: rgba(188, 19, 254, 0.5);
   --txt-main: #e9efff;
   --txt-sub: #9ba9c9;
   --neon-blue: #00f3ff;
@@ -923,10 +946,40 @@ html, body {
   overflow: hidden !important;
   color: var(--txt-main) !important;
   background:
-    radial-gradient(1100px 420px at 10% -20%, rgba(0,243,255,0.15), transparent 70%),
-    radial-gradient(900px 360px at 90% 0%, rgba(255,0,127,0.16), transparent 68%),
-    linear-gradient(180deg, var(--bg-1), var(--bg-0)) !important;
+    radial-gradient(ellipse 120% 50% at 15% -10%, rgba(0,243,255,0.13) 0%, transparent 60%),
+    radial-gradient(ellipse 100% 45% at 85% 5%,  rgba(255,0,127,0.14) 0%, transparent 58%),
+    radial-gradient(ellipse 80%  60% at 50% 100%, rgba(188,19,254,0.10) 0%, transparent 55%),
+    linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%) !important;
   font-family: 'Orbitron', 'Apple SD Gothic Neo', 'Nanum Gothic', sans-serif !important;
+}
+
+/* 사이버펑크 그리드 오버레이 */
+html::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(0,243,255,0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,243,255,0.035) 1px, transparent 1px);
+  background-size: 44px 44px;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* 스캔라인 오버레이 */
+html::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 3px,
+    rgba(0,0,0,0.06) 3px,
+    rgba(0,0,0,0.06) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
 }
 .gradio-container {
   max-width: 1000px !important;
@@ -979,7 +1032,10 @@ footer, .footer { display: none !important; }
   background: var(--panel) !important;
   border: 1px solid var(--line) !important;
   border-radius: 14px !important;
-  box-shadow: 0 0 18px rgba(188, 19, 254, 0.22), inset 0 0 14px rgba(0, 243, 255, 0.08) !important;
+  box-shadow: 0 0 22px rgba(188,19,254,0.28), inset 0 0 18px rgba(0,243,255,0.07) !important;
+  animation: ra-panel-glow 4s ease-in-out infinite !important;
+  position: relative !important;
+  z-index: 1 !important;
 }
 .game-stage > .hide {
   display: none !important;
@@ -1033,10 +1089,15 @@ footer, .footer { display: none !important; }
 }
 .ra-logo {
   font-family: 'Press Start 2P', 'Orbitron', monospace;
-  font-size: clamp(34px, 7vw, 58px);
+  font-size: clamp(28px, 6vw, 52px);
   color: var(--neon-pink);
-  text-shadow: 0 0 10px rgba(255,0,127,.8), 0 0 30px rgba(188,19,254,.45);
-  letter-spacing: 2px;
+  text-shadow:
+    0 0 8px rgba(255,0,127,0.9),
+    0 0 24px rgba(188,19,254,0.6),
+    0 0 56px rgba(188,19,254,0.25);
+  letter-spacing: 3px;
+  animation: ra-glitch 7s ease-in-out infinite, ra-logo-breathe 3s ease-in-out infinite;
+  position: relative;
 }
 .ra-subtitle { margin-top: 14px; font-size: 13px; color: #d6e2ff; opacity: .95; }
 .mode-card { min-height: 52px !important; border-width: 2px !important; }
@@ -1135,6 +1196,24 @@ footer, .footer { display: none !important; }
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(1.04); opacity: 0.92; }
 }
+
+@keyframes ra-panel-glow {
+  0%, 100% { box-shadow: 0 0 22px rgba(188,19,254,0.28), inset 0 0 18px rgba(0,243,255,0.07); }
+  50%       { box-shadow: 0 0 38px rgba(0,243,255,0.32), inset 0 0 22px rgba(188,19,254,0.10); }
+}
+
+@keyframes ra-logo-breathe {
+  0%, 100% { text-shadow: 0 0 8px rgba(255,0,127,0.9), 0 0 24px rgba(188,19,254,0.6), 0 0 56px rgba(188,19,254,0.25); }
+  50%       { text-shadow: 0 0 16px rgba(255,0,127,1.0), 0 0 40px rgba(188,19,254,0.9), 0 0 80px rgba(0,243,255,0.35); }
+}
+
+@keyframes ra-glitch {
+  0%, 85%, 100% { transform: none; clip-path: none; color: var(--neon-pink); }
+  86% { transform: translate(-4px, 0) skewX(-2deg); clip-path: polygon(0 15%, 100% 15%, 100% 45%, 0 45%); color: var(--neon-blue); }
+  87% { transform: translate(4px, 0)  skewX( 2deg); clip-path: polygon(0 55%, 100% 55%, 100% 80%, 0 80%); color: var(--neon-pink); }
+  88% { transform: translate(-2px, 0); clip-path: polygon(0 30%, 100% 30%, 100% 60%, 0 60%); color: #fff; }
+  89% { transform: none; clip-path: none; color: var(--neon-pink); }
+}
 """
 
 
@@ -1164,8 +1243,17 @@ with gr.Blocks(title="RespondAI") as app:
             with gr.Column(elem_classes=["screen-body"]):
                 gr.HTML("""
 <div class="ra-title-wrap">
+  <div style="font-family:'Press Start 2P',monospace;font-size:10px;color:rgba(0,243,255,0.5);
+              letter-spacing:6px;margin-bottom:18px;text-transform:uppercase;">
+    ◈ MUSIC BATTLE ◈
+  </div>
   <div class="ra-logo">RespondAI</div>
   <div class="ra-subtitle">AI와 함께하는 즉흥 연주 세션</div>
+  <div style="margin-top:20px;display:flex;align-items:center;gap:10px;justify-content:center;">
+    <div style="height:1px;width:60px;background:linear-gradient(90deg,transparent,rgba(0,243,255,0.6));"></div>
+    <span style="font-size:10px;color:rgba(0,243,255,0.45);letter-spacing:4px;">CALL &amp; RESPONSE</span>
+    <div style="height:1px;width:60px;background:linear-gradient(90deg,rgba(0,243,255,0.6),transparent);"></div>
+  </div>
 </div>
 """)
             with gr.Row(equal_height=True, elem_classes=["screen-actions"]):
