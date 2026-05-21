@@ -45,6 +45,7 @@ def synth_notes(
     sample_rate: int = 22050,
     *,
     role: str = "user",
+    tail_sec: float = 0.3,
 ) -> np.ndarray:
     """Synthesize notes to float32 mono audio using additive sine synthesis.
 
@@ -54,7 +55,7 @@ def synth_notes(
         return np.zeros(int(0.4 * sample_rate), dtype=np.float32)
 
     seconds_per_step = (60.0 / bpm) / 4.0
-    total_dur = max(n.end for n in notes) * seconds_per_step + 0.3
+    total_dur = max(n.end for n in notes) * seconds_per_step + tail_sec
     audio = np.zeros(int(total_dur * sample_rate), dtype=np.float32)
 
     for note in notes:

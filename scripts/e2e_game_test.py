@@ -10,9 +10,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 URL = "http://127.0.0.1:7860"
-START_TIMEOUT = 90
-NOTE_WAIT = 5
-TURN_WAIT = 22
+START_TIMEOUT = 45
+NOTE_WAIT = 2
+TURN_WAIT = 12
 
 
 def wait_server(proc: subprocess.Popen, timeout: float) -> None:
@@ -50,7 +50,7 @@ def run_e2e() -> list[str]:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             page.goto(URL, wait_until="domcontentloaded", timeout=120000)
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(1200)
 
             # S1 → S2
             page.get_by_role("button", name=re.compile("피아노 모드")).click()

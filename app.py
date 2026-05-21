@@ -1,8 +1,8 @@
-"""RespondAI — Phase 1 Gradio app (mock mode)."""
+"""RespondAI — Phase 2 Gradio app (real model)."""
 from __future__ import annotations
 
-import copy
 import random
+import time
 from typing import List, Optional
 
 import matplotlib
@@ -22,17 +22,21 @@ import matplotlib.patches as mpatches
 import numpy as np
 import gradio as gr
 
-from data.tokenizer import Note
+from data.tokenizer import Note, STEPS_PER_BAR
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
-from input.piano import temp_ai_response_for_testing, synth_notes
+from input.piano import synth_notes
+from inference.generate import load_model_for_inference, generate
+from inference.decode import notes_to_wav
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
 MAX_EXCHANGES  = 3
 MAX_NOTES      = 16
 DEFAULT_DURATION = 2   # sixteenth-note steps per note slot
-TOTAL_ROUNDS   = 5
-AI_MODE        = "mock"
+TOTAL_ROUNDS   = 2  # TODO: 테스트용 임시값, 발표 전 5로 복원
+AI_MODE        = "model"
+
+CHECKPOINT_PATH = "checkpoints/best_inference.pt"
 
 SAMPLE_RATE    = 22050
 
@@ -58,6 +62,94 @@ ROUND_CONDITIONS = {
 
 EXCHANGE_STEPS = (MAX_NOTES * DEFAULT_DURATION) + 8   # x-width per exchange slot
 
+# AI 응답 길이: 유저 입력에 맞추되 재생은 AI_RESPONSE_MAX_SEC 로 상한
+AI_MAX_BARS_CAP = 2
+AI_RESPONSE_MAX_SEC = 4.0
+AI_MAX_NOTES_EMPTY = 4
+
+# 키보드 입력 확장: 흰 건반(a s d f g h j k l), 검은 건반(w e r t y u i o)
+KB_WHITE_SEMIS = [0, 2, 4, 5, 7, 9, 11, 12, 14]          # C4..D5
+KB_BLACK_SEMIS = [1, 3, 6, 8, 10, 13, 15, 18]            # C#4..F#5
+KB_ALLOWED_MIDIS = sorted({60 + s for s in (KB_WHITE_SEMIS + KB_BLACK_SEMIS)})
+
+
+def _step_sec(bpm: int) -> float:
+    return (60.0 / bpm) / 4.0
+
+
+def ai_timeline_cap_steps(bpm: int) -> int:
+    """AI 노트 타임라인 상한(16분음표 스텝) — 약 4초."""
+    return max(4, int(AI_RESPONSE_MAX_SEC / _step_sec(bpm)))
+
+
+def _user_time_span(user_notes: List[Note]) -> int:
+    if not user_notes:
+        return ai_timeline_cap_steps(90)
+    return max(n.end for n in user_notes)
+
+
+def generation_limits(user_notes: List[Note]) -> tuple[int, int]:
+    """(max_bars, max_new_tokens) — CALL 길이에 비례."""
+    if not user_notes:
+        return 1, 40
+    span = _user_time_span(user_notes)
+    user_bars = max(1, (span + STEPS_PER_BAR - 1) // STEPS_PER_BAR)
+    max_bars = max(1, min(AI_MAX_BARS_CAP, user_bars))
+    max_new_tokens = min(80, 20 + len(user_notes) * 8)
+    return max_bars, max_new_tokens
+
+
+def compact_note_timeline(notes: List[Note], max_span: int) -> List[Note]:
+    """마디 패딩·긴 공백 제거 — 노트를 이어 붙여 재생."""
+    if not notes:
+        return []
+    ordered = sorted(notes, key=lambda n: (n.start, n.end, n.pitch))
+    out: List[Note] = []
+    t = 0
+    for n in ordered:
+        dur = max(1, min(n.end - n.start, 8))
+        if t + dur > max_span:
+            break
+        out.append(Note(n.pitch, t, t + dur))
+        t += dur
+    return out
+
+
+def fit_ai_response_to_user(
+    ai_notes: List[Note], user_notes: List[Note], bpm: int,
+) -> List[Note]:
+    """유저와 비슷한 길이·밀도로 AI 노트 정리 (무음 구간 제거, 재생 ≤4초)."""
+    if not ai_notes:
+        return []
+    cap_steps = ai_timeline_cap_steps(bpm)
+    user_span = max(n.end for n in user_notes) if user_notes else cap_steps // 2
+    if user_notes:
+        max_notes = min(MAX_NOTES, len(user_notes) + 2)
+        max_span = min(user_span + 4, cap_steps)
+    else:
+        max_notes = AI_MAX_NOTES_EMPTY
+        max_span = cap_steps
+
+    trimmed = sorted(ai_notes, key=lambda n: (n.start, n.end))[:max_notes]
+    return compact_note_timeline(trimmed, max_span=max_span)
+
+
+def align_attn_to_notes(attn_scores: List[float], notes: List[Note]) -> List[float]:
+    if not attn_scores or not notes:
+        return attn_scores or []
+    n = len(notes)
+    if len(attn_scores) >= n:
+        step = len(attn_scores) / n
+        return [attn_scores[int(i * step)] for i in range(n)]
+    return attn_scores + [attn_scores[-1]] * (n - len(attn_scores))
+
+
+# ─── Model (앱 시작 시 1회 로드) ─────────────────────────────────────────────
+
+print(f"[RespondAI] Loading model from {CHECKPOINT_PATH} ...")
+_MODEL, _TOKENIZER, _DEVICE = load_model_for_inference(CHECKPOINT_PATH)
+print(f"[RespondAI] Model ready on {_DEVICE} ({sum(p.numel() for p in _MODEL.parameters()):,} params)")
+
 
 # ─── State helpers ───────────────────────────────────────────────────────────
 
@@ -76,6 +168,7 @@ def init_state() -> dict:
         "bpm": 90,
         "mode": "piano",
         "total_score": 0,
+        "pending_s4": False,
     }
 
 
@@ -189,10 +282,14 @@ def build_round_audio(
     bpm: int,
 ) -> tuple:
     """Return (sample_rate, int16_mono) for Gradio gr.Audio."""
-    gap = np.zeros(int(0.25 * SAMPLE_RATE), dtype=np.float32)
+    gap = np.zeros(int(0.15 * SAMPLE_RATE), dtype=np.float32)
     user_wav = synth_notes(user_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="user")
-    # [TEST / 임시] AI 오디오 — Phase 2에서 notes_to_wav()로 교체
-    ai_wav = synth_notes(ai_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="ai")
+    ai_wav = synth_notes(
+        ai_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="ai", tail_sec=0.05,
+    )
+    ai_max_samples = int(AI_RESPONSE_MAX_SEC * SAMPLE_RATE)
+    if len(ai_wav) > ai_max_samples:
+        ai_wav = ai_wav[:ai_max_samples]
     combined = np.concatenate([user_wav, gap, ai_wav])
     peak = float(np.abs(combined).max())
     if peak < 1e-8:
@@ -308,13 +405,19 @@ def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
 
 # ─── SVG energy visualization ─────────────────────────────────────────────────
 
-def render_energy_svg(notes: List[Note], role: str = "player") -> str:
-    """Simple circular energy visualization as SVG."""
-    cx, cy, r_base = 80, 80, 45
-    hue_lo = 240 if role == "player" else 40
-    hue_hi = 270 if role == "player" else 0
+def render_energy_svg(
+    notes: List[Note],
+    role: str = "player",
+    attn_scores: Optional[List[float]] = None,
+) -> str:
+    """Circular energy visualization (VIZ-01 / VIZ-02).
 
-    if not notes:
+    Player: pitch → hue (blue→purple), spoke length.
+    AI (VIZ-02): attn_scores → spoke length + hue (orange→red), lightness tracks generation progress.
+    """
+    cx, cy, r_base = 80, 80, 45
+
+    if not notes and not attn_scores:
         return (
             f'<svg width="160" height="160" style="background:#0d0d1a;border-radius:50%;">'
             f'<circle cx="{cx}" cy="{cy}" r="45" fill="none" '
@@ -324,22 +427,41 @@ def render_energy_svg(notes: List[Note], role: str = "player") -> str:
         )
 
     slices = []
-    n = len(notes)
-    for i, note in enumerate(notes):
-        angle = (i / n) * 360
-        norm_pitch = max(0, min(1, (note.pitch - 40) / 50))
-        radius = r_base + norm_pitch * 25
-        hue = hue_lo + norm_pitch * (hue_hi - hue_lo)
-        sat = 70 + norm_pitch * 30
-        lightness = 50
-        # Draw spoke
-        rad = np.radians(angle)
-        x2 = cx + radius * np.cos(rad)
-        y2 = cy + radius * np.sin(rad)
-        slices.append(
-            f'<line x1="{cx}" y1="{cy}" x2="{x2:.1f}" y2="{y2:.1f}" '
-            f'stroke="hsl({hue:.0f},{sat:.0f}%,{lightness}%)" stroke-width="2.5" stroke-linecap="round"/>'
-        )
+
+    if role == "ai" and attn_scores:
+        # VIZ-02: attention scores → spoke
+        n = len(attn_scores)
+        for i, score in enumerate(attn_scores):
+            angle = (i / n) * 360
+            norm = max(0.0, min(1.0, float(score)))
+            progress = i / max(n - 1, 1)          # 0→1 as generation proceeds
+            hue = 40 - norm * 40                   # orange(40°) → red(0°)
+            sat = 70
+            lightness = 30 + progress * 40         # 30→70% as per spec
+            radius = r_base + norm * 28
+            rad = np.radians(angle)
+            x2 = cx + radius * np.cos(rad)
+            y2 = cy + radius * np.sin(rad)
+            slices.append(
+                f'<line x1="{cx}" y1="{cy}" x2="{x2:.1f}" y2="{y2:.1f}" '
+                f'stroke="hsl({hue:.0f},{sat}%,{lightness:.0f}%)" stroke-width="2.5" stroke-linecap="round"/>'
+            )
+    else:
+        # VIZ-01: pitch → hue (blue 240° → purple 270°)
+        n = len(notes)
+        for i, note in enumerate(notes):
+            angle = (i / n) * 360
+            norm_pitch = max(0.0, min(1.0, (note.pitch - 40) / 50))
+            radius = r_base + norm_pitch * 25
+            hue = 240 + norm_pitch * 30
+            sat = 70 + norm_pitch * 30
+            rad = np.radians(angle)
+            x2 = cx + radius * np.cos(rad)
+            y2 = cy + radius * np.sin(rad)
+            slices.append(
+                f'<line x1="{cx}" y1="{cy}" x2="{x2:.1f}" y2="{y2:.1f}" '
+                f'stroke="hsl({hue:.0f},{sat:.0f}%,50%)" stroke-width="2.5" stroke-linecap="round"/>'
+            )
 
     inner_r = r_base - 10
     label = "🎹" if role == "player" else "🤖"
@@ -355,31 +477,31 @@ def render_energy_svg(notes: List[Note], role: str = "player") -> str:
 # ─── JS: elem_id nk-{midi} / btn-undo Gradio 버튼 클릭 ─────────────────────
 
 KEYBOARD_JS = """() => {
-  if (window.__respondAIKeyboardV === 3) return;
-  window.__respondAIKeyboardV = 3;
+  if (window.__respondAIKeyboardV === 5) return;
+  window.__respondAIKeyboardV = 5;
 
-  /* 물리 키(e.code) — 영문/한글 키보드 공통 */
-  const SEMI_BY_CODE = {
-    KeyA:0, KeyW:1, KeyS:2, KeyE:3, KeyD:4, KeyF:5, KeyT:6,
-    KeyG:7, KeyY:8, KeyH:9, KeyU:10, KeyJ:11, KeyK:12
-  };
-  /* e.key — 영문 */
-  const SEMI_BY_EN = {
-    a:0,w:1,s:2,e:3,d:4,f:5,t:6,g:7,y:8,h:9,u:10,j:11,k:12
-  };
-  /* e.key — 한글 2벌식(같은 자판 위치) */
-  const SEMI_BY_KO = {
-    'ㅁ':0,'ㅈ':1,'ㄴ':2,'ㄷ':3,'ㅇ':4,'ㄹ':5,'ㅌ':6,
-    'ㅎ':7,'ㅛ':8,'ㅅ':9,'ㅕ':10,'ㅑ':11,'ㅐ':12
-  };
+  /* 확장 건반: 흰 a s d f g h j k l / 검 w e r t y u i o */
+  const WHITE_SEMI = { KeyA:0, KeyS:2, KeyD:4, KeyF:5, KeyG:7, KeyH:9, KeyJ:11, KeyK:12, KeyL:14 };
+  const BLACK_SEMI = { KeyW:1, KeyE:3, KeyR:6, KeyT:8, KeyY:10, KeyU:13, KeyI:15, KeyO:18 };
+  const KO_WHITE = { 'ㅁ':0,'ㄴ':2,'ㅇ':4,'ㄹ':5,'ㅎ':7,'ㅗ':9,'ㅓ':11,'ㅏ':12,'ㅣ':14 };
+  const KO_BLACK = { 'ㅈ':1,'ㄷ':3,'ㄱ':6,'ㅅ':8,'ㅛ':10,'ㅕ':13,'ㅑ':15,'ㅐ':18 };
   let baseOctave = 4;
   const activeKeys = new Set();
 
-  function semiFromEvent(e) {
-    if (SEMI_BY_CODE[e.code] !== undefined) return SEMI_BY_CODE[e.code];
+  function midiFromEvent(e) {
+    if (WHITE_SEMI[e.code] !== undefined) return (baseOctave + 1) * 12 + WHITE_SEMI[e.code];
+    if (BLACK_SEMI[e.code] !== undefined) return (baseOctave + 1) * 12 + BLACK_SEMI[e.code];
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    if (SEMI_BY_EN[k] !== undefined) return SEMI_BY_EN[k];
-    if (SEMI_BY_KO[e.key] !== undefined) return SEMI_BY_KO[e.key];
+    if (k in {a:1,s:1,d:1,f:1,g:1,h:1,j:1,k:1,l:1}) {
+      const map = {a:0,s:2,d:4,f:5,g:7,h:9,j:11,k:12,l:14};
+      return (baseOctave + 1) * 12 + map[k];
+    }
+    if (k in {w:1,e:1,r:1,t:1,y:1,u:1,i:1,o:1}) {
+      const map = {w:1,e:3,r:6,t:8,y:10,u:13,i:15,o:18};
+      return (baseOctave + 1) * 12 + map[k];
+    }
+    if (KO_WHITE[e.key] !== undefined) return (baseOctave + 1) * 12 + KO_WHITE[e.key];
+    if (KO_BLACK[e.key] !== undefined) return (baseOctave + 1) * 12 + KO_BLACK[e.key];
     return null;
   }
 
@@ -387,18 +509,35 @@ KEYBOARD_JS = """() => {
     return e.code || e.key;
   }
 
+  function isInputLocked() {
+    const btn = gradioBtn('btn-confirm');
+    return !!(btn && btn.disabled);
+  }
+
+  function isVisible(el) {
+    if (!el) return false;
+    const cs = window.getComputedStyle ? getComputedStyle(el) : null;
+    if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+    const r = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    return !!(r && r.width > 0 && r.height > 0);
+  }
+
   function gradioBtn(id) {
     const roots = [document];
     document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
       if (h.shadowRoot) roots.push(h.shadowRoot);
     });
+    let fallback = null;
     for (const root of roots) {
-      let el = root.getElementById(id);
-      if (!el) el = root.querySelector('[id="' + id + '"]');
-      if (!el) continue;
-      return el.tagName === 'BUTTON' ? el : el.querySelector('button');
+      const nodes = root.querySelectorAll('[id="' + id + '"]');
+      for (const el of nodes) {
+        const btn = el.tagName === 'BUTTON' ? el : el.querySelector('button');
+        if (!btn) continue;
+        if (!fallback) fallback = btn;
+        if (isVisible(btn)) return btn;
+      }
     }
-    return null;
+    return fallback;
   }
 
   let audioCtx = null;
@@ -459,6 +598,7 @@ KEYBOARD_JS = """() => {
   window.respondAI = { sendNote, flashKey };
 
   document.addEventListener('mousedown', function(e) {
+    if (isInputLocked()) return;
     const key = e.target.closest && e.target.closest('[data-midi]');
     if (!key || !key.dataset.midi) return;
     e.preventDefault();
@@ -469,11 +609,12 @@ KEYBOARD_JS = """() => {
   function isGameKey(e) {
     if (e.key === 'Enter' || e.key === 'Backspace') return true;
     if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return true;
-    return semiFromEvent(e) !== null;
+    return midiFromEvent(e) !== null;
   }
 
   window.addEventListener('keydown', function(e) {
     if (!isGameKey(e)) return;
+    if (isInputLocked()) return;
     if (e.repeat) return;
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -491,14 +632,14 @@ KEYBOARD_JS = """() => {
     }
     if (e.key === 'Backspace') { sendNote(-1); return; }
     if (e.key === 'Enter') { clickConfirm(); return; }
-    const semi = semiFromEvent(e);
+    const midi = midiFromEvent(e);
     const tok = keyToken(e);
-    if (semi !== null && !activeKeys.has(tok)) {
+    if (midi !== null && !activeKeys.has(tok)) {
       activeKeys.add(tok);
-      let midi = semi === 12 ? (baseOctave + 2) * 12 : (baseOctave + 1) * 12 + semi;
-      midi = Math.max(60, Math.min(71, midi));
-      sendNote(midi);
-      flashKey(midi);
+      if (midi >= 21 && midi <= 108) {
+        sendNote(midi);
+        flashKey(midi);
+      }
     }
   }, true);
 
@@ -515,8 +656,10 @@ STOP_AUDIO_JS = """() => {
   });
 }"""
 
-PLAY_EXCHANGE_FROM_START_JS = """() => {
-  function findExchangeAudio() {
+# Gradio Audio blob URL이 비어 duration=NaN 인 경우가 있어 JS ended 대기는 멈춤 → 서버 sleep 사용
+PLAY_EXCHANGE_JS = """async () => {
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function findAudio() {
     const roots = [document];
     document.querySelectorAll('gradio-app, .gradio-container').forEach((h) => {
       if (h.shadowRoot) roots.push(h.shadowRoot);
@@ -531,17 +674,14 @@ PLAY_EXCHANGE_FROM_START_JS = """() => {
     }
     return null;
   }
-  const audio = findExchangeAudio();
-  if (!audio) return;
-  const start = () => {
-    try {
-      audio.pause();
-      audio.currentTime = 0;
-      audio.play().catch(() => {});
-    } catch (_) {}
-  };
-  if (audio.readyState >= 2) start();
-  else audio.addEventListener('loadeddata', start, { once: true });
+  for (let i = 0; i < 40; i++) {
+    const a = findAudio();
+    if (a && (a.currentSrc || a.src)) {
+      try { a.pause(); a.currentTime = 0; await a.play(); } catch (_) {}
+      return;
+    }
+    await sleep(50);
+  }
 }"""
 
 FOCUS_GAME_JS = """() => {
@@ -553,40 +693,38 @@ FOCUS_GAME_JS = """() => {
 # ─── Piano keyboard HTML (pure HTML/CSS, NO <script> — onclick calls window.respondAI) ──
 
 def render_piano_html(base_octave: int = 4) -> str:
-    WHITE_SEMIS   = [0, 2, 4, 5, 7, 9, 11]
-    BLACK_OFFSETS = [(0,1),(1,3),(3,6),(4,8),(5,10)]  # (white_key_idx_in_oct, semitone)
-    NOTE_NAMES    = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
-    OCTAVES = 1
-    WW, WH = 34, 72   # white key width / height (compact)
-    BW, BH = 20, 44   # black key width / height
-    total_w = OCTAVES * 7 * WW
+    NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
+    white_midis = [60 + s for s in KB_WHITE_SEMIS]
+    black_midis = [60 + s for s in KB_BLACK_SEMIS]
+
+    WW, WH = 32, 76
+    BW, BH = 18, 46
+    total_w = len(white_midis) * WW
 
     whites, blacks = [], []
+    for wi, midi in enumerate(white_midis):
+        left = wi * WW
+        name = NOTE_NAMES[midi % 12] + str(midi // 12 - 1)
+        whites.append(
+            f'<div data-midi="{midi}"'
+            f' style="position:absolute;left:{left}px;width:{WW-2}px;height:{WH}px;'
+            f'background:#ececec;border:1px solid #666;border-radius:0 0 4px 4px;'
+            f'cursor:pointer;display:flex;align-items:flex-end;justify-content:center;'
+            f'padding-bottom:3px;box-sizing:border-box;">'
+            f'<span style="font-size:8px;color:#999;pointer-events:none;">{name}</span>'
+            f'</div>'
+        )
 
-    for oct in range(OCTAVES):
-        for wi, semi in enumerate(WHITE_SEMIS):
-            midi  = (base_octave + oct + 1) * 12 + semi
-            name  = NOTE_NAMES[semi] + str(base_octave + oct)
-            left  = (oct * 7 + wi) * WW
-            whites.append(
-                f'<div data-midi="{midi}"'
-                f' style="position:absolute;left:{left}px;width:{WW-2}px;height:{WH}px;'
-                f'background:#ececec;border:1px solid #666;border-radius:0 0 4px 4px;'
-                f'cursor:pointer;display:flex;align-items:flex-end;justify-content:center;'
-                f'padding-bottom:3px;box-sizing:border-box;">'
-                f'<span style="font-size:8px;color:#999;pointer-events:none;">{name}</span>'
-                f'</div>'
-            )
-        for wi, semi in BLACK_OFFSETS:
-            midi = (base_octave + oct + 1) * 12 + semi
-            left = (oct * 7 + wi + 1) * WW - BW // 2 - 1
-            blacks.append(
-                f'<div data-midi="{midi}"'
-                f' style="position:absolute;left:{left}px;top:0;width:{BW}px;height:{BH}px;'
-                f'background:#1a1a1a;border:1px solid #000;border-radius:0 0 3px 3px;'
-                f'cursor:pointer;z-index:2;">'
-                f'</div>'
-            )
+    # 검은 건반은 확장 키 배열 순서대로 배치 (8개)
+    for bi, midi in enumerate(black_midis):
+        left = (bi + 1) * WW - BW // 2 - 1
+        blacks.append(
+            f'<div data-midi="{midi}"'
+            f' style="position:absolute;left:{left}px;top:0;width:{BW}px;height:{BH}px;'
+            f'background:#1a1a1a;border:1px solid #000;border-radius:0 0 3px 3px;'
+            f'cursor:pointer;z-index:2;">'
+            f'</div>'
+        )
 
     return (
         f'<div style="user-select:none;padding:10px 0;background:#111122;'
@@ -596,8 +734,9 @@ def render_piano_html(base_octave: int = 4) -> str:
         f' &nbsp;|&nbsp;'
         f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">Shift+↑↓</kbd> 옥타브'
         f' &nbsp;'
-        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">a-k</kbd> 또는 '
-        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">ㅁ~ㅐ</kbd> 건반 (입력 시 소리)'
+        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">a s d f g h j k l</kbd> '
+        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">w e r t y u i o</kbd> 또는 '
+        f'<kbd style="background:#333;color:#aaa;padding:1px 5px;border-radius:3px;font-size:10px;">ㅁ ㄴ ㅇ ㄹ ㅎ ㅗ ㅓ ㅏ ㅣ / ㅈ ㄷ ㄱ ㅅ ㅛ ㅕ ㅑ ㅐ</kbd>'
         f'</div>'
         f'<div style="display:inline-block;position:relative;width:{total_w}px;height:{WH}px;">'
         + ''.join(whites)
@@ -610,14 +749,24 @@ def render_piano_html(base_octave: int = 4) -> str:
 
 def hud_html(state: dict) -> str:
     phase = state["phase"]
-    phase_label = "🎵 당신의 차례" if phase == "user_input" else "🤖 AI 응답 중..."
-    phase_color = "#4af" if phase == "user_input" else "#f84"
+    if phase == "user_input":
+        phase_label = "🎵 당신의 차례"
+        phase_color = "#4af"
+    elif phase == "ai_response":
+        phase_label = "🤖 AI 응답 중..."
+        phase_color = "#f84"
+    elif phase == "round_result":
+        phase_label = "📊 라운드 결과"
+        phase_color = "#f4c430"
+    else:
+        phase_label = "🏁 게임 종료"
+        phase_color = "#9ef"
     return f"""
 <div style="background:#0d0d2a;border-radius:8px;padding:10px 18px;
             display:flex;align-items:center;justify-content:space-between;
             font-family:monospace;color:#ccd;">
   <div>
-    <span style="font-size:18px;font-weight:bold;">R{state['round']}/5</span>
+    <span style="font-size:18px;font-weight:bold;">R{state['round']}/{TOTAL_ROUNDS}</span>
     <span style="margin-left:12px;color:#aab;">교환 {state['exchange']}/{MAX_EXCHANGES}</span>
   </div>
   <div>
@@ -808,7 +957,7 @@ footer, .footer { display: none !important; }
   flex-direction: column !important;
   justify-content: space-between !important;
   box-sizing: border-box !important;
-  overflow: hidden !important;
+  overflow: auto !important;
   padding: 4px 2px 8px !important;
 }
 .game-stage > .hide {
@@ -817,7 +966,7 @@ footer, .footer { display: none !important; }
 .screen-body {
   flex: 1 1 auto !important;
   min-height: 0 !important;
-  overflow: hidden !important;
+  overflow: auto !important;
   display: flex !important;
   flex-direction: column !important;
   gap: 4px !important;
@@ -828,6 +977,9 @@ footer, .footer { display: none !important; }
   padding-top: 4px !important;
 }
 .screen-actions:last-of-type { margin-top: 0 !important; }
+.screen-actions button:disabled {
+  display: none !important;
+}
 .quick-notes button { min-width: 1.8rem !important; padding: 3px 4px !important; font-size: 11px !important; }
 
 /* S3: 피아노롤만 넓게, 사이드 viz 숨김 */
@@ -907,6 +1059,8 @@ with gr.Blocks(title="RespondAI") as app:
                 btn_cancel   = gr.Button("← 취소", scale=1)
                 btn_preview  = gr.Button("▶ 미리듣기", scale=1)
                 btn_confirm  = gr.Button("✅ 확정 (Enter)", scale=2, variant="primary", elem_id="btn-confirm")
+                btn_next_inline = gr.Button("다음 라운드 →", variant="primary", interactive=False, elem_id="btn-next-inline")
+                btn_restart_inline = gr.Button("🔄 다시하기", variant="secondary", interactive=False, elem_id="btn-restart-inline")
 
         # ── S4: Round result ─────────────────────────────────────────────────
         with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s4:
@@ -927,24 +1081,14 @@ with gr.Blocks(title="RespondAI") as app:
                 btn_restart = gr.Button("🔄 다시하기", variant="secondary")
 
     # 건반 브리지 (Blocks 맨 끝 + 화면 밖 배치)
+    _note_names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
     with gr.Row(elem_classes=["note-input-layer"]):
         btn_undo = gr.Button("⌫", elem_id="btn-undo")
-        nk_c  = gr.Button("C",  elem_id="nk-60")
-        nk_cs = gr.Button("C#", elem_id="nk-61")
-        nk_d  = gr.Button("D",  elem_id="nk-62")
-        nk_ds = gr.Button("D#", elem_id="nk-63")
-        nk_e  = gr.Button("E",  elem_id="nk-64")
-        nk_f  = gr.Button("F",  elem_id="nk-65")
-        nk_fs = gr.Button("F#", elem_id="nk-66")
-        nk_g  = gr.Button("G",  elem_id="nk-67")
-        nk_gs = gr.Button("G#", elem_id="nk-68")
-        nk_a  = gr.Button("A",  elem_id="nk-69")
-        nk_as = gr.Button("A#", elem_id="nk-70")
-        nk_b  = gr.Button("B",  elem_id="nk-71")
-    _note_btn_map = [
-        (60, nk_c), (61, nk_cs), (62, nk_d), (63, nk_ds), (64, nk_e), (65, nk_f),
-        (66, nk_fs), (67, nk_g), (68, nk_gs), (69, nk_a), (70, nk_as), (71, nk_b),
-    ]
+        _note_btn_map = []
+        for midi in KB_ALLOWED_MIDIS:
+            label = _note_names[midi % 12]
+            _btn = gr.Button(label, elem_id=f"nk-{midi}")
+            _note_btn_map.append((midi, _btn))
 
     # ─────────────────────────────────────────────────────────────────────────
     # Callbacks
@@ -1001,8 +1145,12 @@ with gr.Blocks(title="RespondAI") as app:
             render_energy_svg([], "player"),
             render_energy_svg([], "ai"),
             note_list_html([]),
+            render_piano_html(4),
             gr.update(interactive=True),
             gr.update(interactive=True),
+            gr.update(interactive=True),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             _stop_audio(),
             *_screens("S3"),
         )
@@ -1013,7 +1161,8 @@ with gr.Blocks(title="RespondAI") as app:
     ).then(
         on_round_start_ui, inputs=[state],
         outputs=[s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
-                 btn_confirm, btn_cancel, s3_audio,
+                 s3_piano,
+                 btn_confirm, btn_cancel, btn_preview, btn_next_inline, btn_restart_inline, s3_audio,
                  screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
     )
     round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
@@ -1061,81 +1210,13 @@ with gr.Blocks(title="RespondAI") as app:
 
     btn_preview.click(on_preview, inputs=[state], outputs=[s3_audio])
 
-    # Confirm notes → AI response → score
-    def on_confirm(st):
-        if st["phase"] != "user_input":
-            return (st, render_piano_roll(st), note_list_html([]),
-                    hud_html(st),
-                    render_energy_svg(st["current_notes"], "player"),
-                    render_energy_svg([], "ai"),
-                    gr.update(), gr.update(interactive=False))
-
-        user_notes = list(st["current_notes"])
-        # [TEST / 임시] Phase 1 UI 테스트용 AI — 빈 입력 시 고정 멜로디, 있으면 옥타브+12
-        # Phase 2: generate() 결과의 response_notes로 교체
-        ai_notes = temp_ai_response_for_testing(user_notes)
-
-        key_token  = KEY_TO_TOKEN[st["key"]]
-        score      = compute_exchange_score(
-            user_notes, st["ai_notes"], st["r1_motif"],
-            st["round"], st["exchange"], key_token,
-        )
-
-        if st["round"] == 1 and st["exchange"] == 1 and user_notes:
-            st["r1_motif"] = user_notes
-
-        st["exchange_log"] = st["exchange_log"] + [{
-            "user_notes": user_notes,
-            "ai_notes":   ai_notes,
-            "score":      score,
-        }]
-        st["ai_notes"]      = ai_notes
-        st["current_notes"] = []
-        st["phase"]         = "ai_response"
-        audio = build_round_audio(user_notes, ai_notes, st["bpm"])
-        st["_playback_ms"] = audio_duration_ms(audio)
-        fig   = render_piano_roll(st)
-
-        return (
-            st,
-            fig,
-            note_list_html([]),
-            hud_html(st),
-            render_energy_svg(user_notes, "player"),
-            render_energy_svg(ai_notes,   "ai"),
-            gr.update(interactive=False),
-            gr.update(),  # s3_audio — 다음 단계에서 로드
-        )
-
-    def on_confirm_audio(st):
-        """오디오만 별도 전송(Plot 렌더 후 로드 지연 → 끝만 재생되는 현상 방지)."""
-        if st["phase"] != "ai_response" or not st["exchange_log"]:
-            return st, gr.update()
-        last = st["exchange_log"][-1]
-        audio = build_round_audio(last["user_notes"], last["ai_notes"], st["bpm"])
-        st["_playback_ms"] = audio_duration_ms(audio)
-        return st, gr.update(value=audio, visible=True, autoplay=True)
-
-    _continue_screen_outputs = [state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5]
-    _continue_ui_outputs = [
-        s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
-        btn_confirm, s3_audio, s4_result_html, s4_roll,
-        screen_s1, screen_s2, screen_s3, screen_s4, screen_s5,
+    _confirm_outputs = [
+        state, s3_roll, s3_note_list, s3_hud_html, s3_viz_player, s3_viz_ai, s3_piano,
+        btn_confirm, btn_cancel, btn_preview, btn_next_inline, btn_restart_inline, s3_audio,
     ]
 
-    def wait_for_playback(st: dict):
-        import time
-        ms = int(st.get("_playback_ms", 3000))
-        time.sleep(max(1.2, ms / 1000.0 * 1.25 + 0.5))
-        return st
-
-    def on_continue_state(st):
+    def _finalize_round(st: dict) -> None:
         exs = st["exchange_log"]
-        if st["exchange"] < MAX_EXCHANGES:
-            st["exchange"] += 1
-            st["phase"] = "user_input"
-            return st, *_screens("S3")
-
         exchange_scores = [e["score"] for e in exs]
         round_total = int(sum(s["total"] for s in exchange_scores) / len(exchange_scores))
         r5_bonus = False
@@ -1144,7 +1225,6 @@ with gr.Blocks(title="RespondAI") as app:
             r5_bonus = last_motif_raw >= 0.5
         if r5_bonus:
             round_total += 150
-
         st["round_results"] = st["round_results"] + [{
             "round_num": st["round"],
             "key": st["key"],
@@ -1156,46 +1236,111 @@ with gr.Blocks(title="RespondAI") as app:
         }]
         st["total_score"] += round_total
         st["phase"] = "round_result"
-        return st, *_screens("S4")
 
-    def on_continue_ui(st):
-        if st["phase"] == "user_input":
+    def on_confirm(st):
+        """확정: AI 생성/재생 대기 + 교환/라운드/게임오버 UI 갱신."""
+        if st["phase"] != "user_input":
+            last = st["exchange_log"][-1] if st["exchange_log"] else None
+            last_attn = last.get("attn_scores") if last else None
+            show_next = (st.get("phase") == "round_result" and st.get("round", 1) < TOTAL_ROUNDS)
+            show_restart = (st.get("phase") == "game_over")
             return (
-                hud_html(st),
-                render_piano_roll(st),
+                st,
+                render_piano_roll(st), note_list_html([]), hud_html(st),
                 render_energy_svg([], "player"),
-                render_energy_svg(st["ai_notes"], "ai"),
-                note_list_html([]),
-                gr.update(interactive=True),
-                _stop_audio(),
-                gr.update(), gr.update(),
-                *_screens("S3"),
+                render_energy_svg(st["ai_notes"], "ai", last_attn),
+                gr.update(),
+                gr.update(interactive=(st["phase"] == "user_input")),
+                gr.update(interactive=(st["phase"] == "user_input")),
+                gr.update(interactive=(st["phase"] == "user_input")),
+                gr.update(interactive=show_next),
+                gr.update(interactive=show_restart),
+                gr.update(),
             )
-        return (
-            hud_html(st),
-            render_piano_roll(st),
-            render_energy_svg([], "player"),
-            render_energy_svg([], "ai"),
-            note_list_html([]),
-            gr.update(interactive=False),
-            _stop_audio(),
-            s4_html(st),
-            render_full_history_roll(st["round_results"]),
-            *_screens("S4"),
+
+        user_notes = list(st["current_notes"])
+        key_token = KEY_TO_TOKEN[st["key"]]
+        exchange_num = len(st["exchange_log"]) + 1
+        st["exchange"] = exchange_num
+        st["phase"] = "ai_response"
+
+        max_bars, max_new_tokens = generation_limits(user_notes)
+        result = generate(
+            _MODEL, _TOKENIZER, user_notes,
+            key=key_token, tempo=st["bpm"],
+            max_bars=max_bars,
+            max_new_tokens=max_new_tokens,
+            temperature=0.95,
+        )
+        ai_notes = fit_ai_response_to_user(result.response_notes, user_notes, st["bpm"])
+        attn_scores = align_attn_to_notes(result.attn_scores, ai_notes)
+        score = compute_exchange_score(
+            user_notes, st["ai_notes"], st["r1_motif"],
+            st["round"], exchange_num, key_token,
         )
 
-    confirm_evt = btn_confirm.click(
-        on_confirm, inputs=[state],
-        outputs=[state, s3_roll, s3_note_list, s3_hud_html,
-                 s3_viz_player, s3_viz_ai, btn_confirm, s3_audio],
+        if st["round"] == 1 and exchange_num == 1 and user_notes:
+            st["r1_motif"] = user_notes
+
+        st["exchange_log"] = st["exchange_log"] + [{
+            "user_notes": user_notes,
+            "ai_notes": ai_notes,
+            "score": score,
+            "attn_scores": attn_scores,
+        }]
+        st["ai_notes"] = ai_notes
+        st["current_notes"] = []
+
+        audio = build_round_audio(user_notes, ai_notes, st["bpm"])
+        ms = audio_duration_ms(audio)
+        time.sleep(max(0.8, min(ms / 1000.0, AI_RESPONSE_MAX_SEC + 2.0)))
+        audio_up = gr.update(value=audio, visible=True, autoplay=True)
+
+        completed = len(st["exchange_log"])
+        if completed < MAX_EXCHANGES:
+            st["exchange"] = completed + 1
+            st["phase"] = "user_input"
+            return (
+                st,
+                render_piano_roll(st), note_list_html([]), hud_html(st),
+                render_energy_svg([], "player"),
+                render_energy_svg(st["ai_notes"], "ai", attn_scores),
+                gr.update(value=render_piano_html(4)),
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+                gr.update(interactive=True),
+                gr.update(interactive=False),
+                gr.update(interactive=False),
+                audio_up,
+            )
+
+        _finalize_round(st)
+        is_final = st["round"] >= TOTAL_ROUNDS
+        if is_final:
+            st["phase"] = "game_over"
+            result_html = s5_html(st)
+        else:
+            result_html = s4_html(st)
+        return (
+            st,
+            render_full_history_roll(st["round_results"]),
+            result_html,
+            hud_html(st),
+            render_energy_svg([], "player"),
+            render_energy_svg([], "ai"),
+            gr.update(value=""),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(interactive=not is_final),
+            gr.update(interactive=is_final),
+            audio_up,
+        )
+
+    confirm_chain = btn_confirm.click(
+        on_confirm, inputs=[state], outputs=_confirm_outputs, show_progress="full",
     )
-    confirm_evt = confirm_evt.then(on_confirm_audio, inputs=[state], outputs=[state, s3_audio])
-    continue_chain = confirm_evt.then(
-        wait_for_playback, inputs=[state], outputs=[state], js=PLAY_EXCHANGE_FROM_START_JS,
-    )
-    continue_chain = continue_chain.then(on_continue_state, inputs=[state], outputs=_continue_screen_outputs)
-    continue_chain = continue_chain.then(on_continue_ui, inputs=[state], outputs=_continue_ui_outputs)
-    continue_chain.then(fn=None, js=FOCUS_GAME_JS)
+    confirm_chain.then(fn=None, js=FOCUS_GAME_JS)
 
     def on_next_round_state(st):
         if st["round"] >= TOTAL_ROUNDS:
@@ -1235,6 +1380,15 @@ with gr.Blocks(title="RespondAI") as app:
                  screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
     )
 
+    btn_next_inline.click(
+        on_next_round_state, inputs=[state],
+        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    ).then(
+        on_next_round_ui, inputs=[state],
+        outputs=[s2_info, s5_result_html, s5_roll,
+                 screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    )
+
     # Restart → S1
     def on_restart(_st):
         return (
@@ -1243,6 +1397,11 @@ with gr.Blocks(title="RespondAI") as app:
         )
 
     btn_restart.click(
+        on_restart, inputs=[state],
+        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    )
+
+    btn_restart_inline.click(
         on_restart, inputs=[state],
         outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
     )
