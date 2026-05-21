@@ -53,11 +53,11 @@ KEY_TO_TOKEN = {
 }
 
 ROUND_CONDITIONS = {
-    1: "자유롭게 연주하세요",
-    2: "AI의 멜로디에 호응해보세요",
-    3: "R1의 멜로디를 기억하나요?",
-    4: "리듬에 집중해보세요",
-    5: "처음 멜로디로 마무리해보세요",
+    1: "Play freely. This becomes your motif.",
+    2: "Respond to the AI's melody.",
+    3: "Recall the motif from Round 1.",
+    4: "Focus on rhythm.",
+    5: "Close with your opening motif.",
 }
 
 EXCHANGE_STEPS = (MAX_NOTES * DEFAULT_DURATION) + 8   # x-width per exchange slot
@@ -71,6 +71,13 @@ AI_MAX_NOTES_EMPTY = 4
 KB_WHITE_SEMIS = [0, 2, 4, 5, 7, 9, 11, 12, 14]          # C4..D5
 KB_BLACK_SEMIS = [1, 3, 6, 8, 10, 13, 15, 18]            # C#4..F#5
 KB_ALLOWED_MIDIS = sorted({60 + s for s in (KB_WHITE_SEMIS + KB_BLACK_SEMIS)})
+
+# 건반 위에 표시할 키보드 단축키 레이블 (영문/한글)
+MIDI_KEY_LABEL = {
+    60:"A/ㅁ", 61:"W/ㅈ", 62:"S/ㄴ", 63:"E/ㄷ", 64:"D/ㅇ",
+    65:"F/ㄹ", 66:"T/ㅌ", 67:"G/ㅎ", 68:"Y/ㅛ", 69:"H/ㅅ",
+    70:"U/ㅕ", 71:"J/ㅑ", 72:"K/ㅐ", 74:"L/ㅣ",
+}
 
 
 def _step_sec(bpm: int) -> float:
@@ -194,7 +201,7 @@ def compute_exchange_score(
         return {
             "key_consistency": 0, "rhythm_similarity": 0,
             "motif_usage": 0, "creativity_bonus": 0,
-            "total": 0, "feedback": "빈 입력입니다.",
+            "total": 0, "feedback": "No input received.",
             "raw": {"key_consistency": 0.0, "rhythm_pearson": 0.0, "motif_overlap": 0.0},
         }
 
@@ -206,7 +213,7 @@ def compute_exchange_score(
             "key_consistency": kc, "rhythm_similarity": 300,
             "motif_usage": 300, "creativity_bonus": cb,
             "total": kc + 300 + 300 + cb,
-            "feedback": "기준 모티프가 저장됐습니다!",
+            "feedback": "Motif saved as your reference.",
             "raw": {"key_consistency": kc / 300, "rhythm_pearson": 1.0, "motif_overlap": 1.0},
         }
 
@@ -318,7 +325,7 @@ def render_piano_roll(state: dict) -> plt.Figure:
     for ex in range(MAX_EXCHANGES):
         x = ex * EXCHANGE_STEPS
         ax.text(x + EXCHANGE_STEPS / 2, pitch_hi - 1.5,
-                f"교환 {ex+1}", ha="center", va="top",
+                f"EX {ex+1}", ha="center", va="top",
                 color="#888899", fontsize=7)
 
     def draw_notes(notes, exchange_idx, color, alpha=0.85):
@@ -351,7 +358,7 @@ def render_piano_roll(state: dict) -> plt.Figure:
         spine.set_edgecolor("#333355")
 
     # Legend
-    user_patch = mpatches.Patch(color="#4A9EF5", label="플레이어")
+    user_patch = mpatches.Patch(color="#4A9EF5", label="You")
     ai_patch   = mpatches.Patch(color="#F55A4A", label="AI")
     ax.legend(handles=[user_patch, ai_patch], loc="lower right",
               facecolor="#1a1a2e", edgecolor="#555577",
@@ -419,9 +426,9 @@ def render_energy_svg(
 
     if not notes and not attn_scores:
         return (
-            f'<svg width="160" height="160" style="background:#0d0d1a;border-radius:50%;">'
+            f'<svg width="160" height="160" style="background:#1C1C1C;border-radius:50%;">'
             f'<circle cx="{cx}" cy="{cy}" r="45" fill="none" '
-            f'stroke="{"#334" if role == "player" else "#433"}" stroke-width="2"/>'
+            f'stroke="{"#2a2a3a" if role == "player" else "#3a2a2a"}" stroke-width="2"/>'
             f'<text x="{cx}" y="{cy+5}" text-anchor="middle" fill="#555" font-size="11">'
             f'{"🎹" if role == "player" else "🤖"}</text></svg>'
         )
@@ -466,10 +473,10 @@ def render_energy_svg(
     inner_r = r_base - 10
     label = "🎹" if role == "player" else "🤖"
     return (
-        f'<svg width="160" height="160" style="background:#0d0d1a;border-radius:50%;">'
+        f'<svg width="160" height="160" style="background:#1C1C1C;border-radius:50%;">'
         + "".join(slices)
-        + f'<circle cx="{cx}" cy="{cy}" r="{inner_r}" fill="#0d0d1a" stroke="none"/>'
-        + f'<text x="{cx}" y="{cy+5}" text-anchor="middle" fill="#ccc" font-size="14">{label}</text>'
+        + f'<circle cx="{cx}" cy="{cy}" r="{inner_r}" fill="#1C1C1C" stroke="none"/>'
+        + f'<text x="{cx}" y="{cy+5}" text-anchor="middle" fill="#888" font-size="14">{label}</text>'
         + f'</svg>'
     )
 
@@ -616,6 +623,28 @@ KEYBOARD_JS = """() => {
 
   window.respondAI = { sendNote, flashKey };
 
+  // Simple modal controller for S1 nav popups (lives globally so onclick attrs work)
+  if (!window.respondAIModal) {
+    window.respondAIModal = {
+      open(name) {
+        const el = document.getElementById('ra-modal-' + name);
+        if (!el) return;
+        el.classList.add('open');
+        document.documentElement.classList.add('ra-modal-locked');
+      },
+      close() {
+        document.querySelectorAll('.ra-modal.open').forEach(m => m.classList.remove('open'));
+        document.documentElement.classList.remove('ra-modal-locked');
+      },
+    };
+    window.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && document.querySelector('.ra-modal.open')) {
+        e.preventDefault();
+        window.respondAIModal.close();
+      }
+    }, true);
+  }
+
   window.addEventListener('pointerdown', unlockAudio, { capture: true });
   window.addEventListener('touchstart', unlockAudio, { capture: true });
 
@@ -719,48 +748,49 @@ def render_piano_html(base_octave: int = 4) -> str:
     white_midis = [60 + s for s in KB_WHITE_SEMIS]
     black_midis = [60 + s for s in KB_BLACK_SEMIS]
 
-    WW, WH = 32, 76
-    BW, BH = 18, 46
+    WW, WH = 64, 152
+    BW, BH = 36, 92
     total_w = len(white_midis) * WW
 
     whites, blacks = [], []
     for wi, midi in enumerate(white_midis):
         left = wi * WW
         name = NOTE_NAMES[midi % 12] + str(midi // 12 - 1)
+        kb_label = MIDI_KEY_LABEL.get(midi, "")
         whites.append(
             f'<div data-midi="{midi}"'
             f' class="ra-key ra-key-white"'
             f' style="position:absolute;left:{left}px;width:{WW-2}px;height:{WH}px;'
-            f'cursor:pointer;display:flex;align-items:flex-end;justify-content:center;'
-            f'padding-bottom:3px;box-sizing:border-box;">'
+            f'cursor:pointer;display:flex;flex-direction:column;align-items:center;'
+            f'justify-content:flex-end;padding-bottom:4px;box-sizing:border-box;">'
             f'<span class="ra-key-label">{name}</span>'
-            f'</div>'
+            + (f'<span class="ra-key-shortcut">{kb_label}</span>' if kb_label else '')
+            + f'</div>'
         )
 
-    # 검은 건반은 확장 키 배열 순서대로 배치 (8개)
     for bi, midi in enumerate(black_midis):
         left = (bi + 1) * WW - BW // 2 - 1
+        kb_label = MIDI_KEY_LABEL.get(midi, "")
         blacks.append(
             f'<div data-midi="{midi}"'
             f' class="ra-key ra-key-black"'
             f' style="position:absolute;left:{left}px;top:0;width:{BW}px;height:{BH}px;'
-            f'border-radius:0 0 3px 3px;'
-            f'cursor:pointer;z-index:2;">'
-            f'</div>'
+            f'border-radius:0 0 3px 3px;cursor:pointer;z-index:2;'
+            f'display:flex;align-items:flex-end;justify-content:center;padding-bottom:3px;">'
+            + (f'<span class="ra-key-shortcut ra-key-shortcut-black">{kb_label}</span>' if kb_label else '')
+            + f'</div>'
         )
 
     return (
         f'<div class="ra-piano-wrap">'
         f'<div class="ra-piano-help">'
-        f'옥타브 <span id="oct-display">{base_octave}</span>'
-        f' &nbsp;|&nbsp;'
-        f'<kbd>Shift+↑↓</kbd> 옥타브'
-        f' &nbsp;'
-        f'<kbd>a s d f g h j k l</kbd> '
-        f'<kbd>w e r t y u i o</kbd> 또는 '
-        f'<kbd>ㅁ ㄴ ㅇ ㄹ ㅎ ㅗ ㅓ ㅏ ㅣ / ㅈ ㄷ ㄱ ㅅ ㅛ ㅕ ㅑ ㅐ</kbd>'
+        f'<span class="ra-help-dot">●</span>'
+        f' OCT <span id="oct-display">{base_octave}</span>'
+        f'&nbsp;&nbsp;<kbd>Shift+↑↓</kbd> octave'
+        f'&nbsp;&nbsp;<kbd>Backspace</kbd> cancel'
+        f'&nbsp;&nbsp;<kbd>Enter</kbd> confirm'
         f'</div>'
-        f'<div class="ra-piano-keys" style="width:{total_w}px;height:{WH}px;">'
+        f'<div class="ra-piano-keys" style="position:relative;width:{total_w}px;height:{WH}px;">'
         + ''.join(whites)
         + ''.join(blacks)
         + '</div></div>'
@@ -772,44 +802,34 @@ def render_piano_html(base_octave: int = 4) -> str:
 def hud_html(state: dict) -> str:
     phase = state["phase"]
     if phase == "user_input":
-        phase_label = "🎵 당신의 차례"
-        phase_color = "#4af"
+        badge = '<div class="ra-turn-badge ra-turn-player">● YOUR TURN</div>'
     elif phase == "ai_response":
-        phase_label = "🤖 AI 응답 중..."
-        phase_color = "#f84"
+        badge = '<div class="ra-turn-badge ra-turn-ai">● AI RESPONDING</div>'
     elif phase == "round_result":
-        phase_label = "📊 라운드 결과"
-        phase_color = "#f4c430"
+        badge = '<div class="ra-turn-badge ra-turn-result">● ROUND RESULT</div>'
     else:
-        phase_label = "🏁 게임 종료"
-        phase_color = "#9ef"
+        badge = '<div class="ra-turn-badge ra-turn-result">● SESSION END</div>'
     return f"""
 <div class="ra-hud">
   <div class="ra-hud-group">
     <span class="ra-hud-round">R{state['round']}/{TOTAL_ROUNDS}</span>
-    <span class="ra-hud-exchange">교환 {state['exchange']}/{MAX_EXCHANGES}</span>
+    <span class="ra-hud-exchange">EX {state['exchange']}/{MAX_EXCHANGES}</span>
   </div>
   <div class="ra-hud-group">
-    <span class="ra-chip">
-      🎼 {state['key']}
-    </span>
-    <span class="ra-chip">
-      ♩ {state['bpm']} BPM
-    </span>
+    <span class="ra-chip">🎼 {state['key']}</span>
+    <span class="ra-chip">♩ {state['bpm']} BPM</span>
   </div>
   <div class="ra-hud-group">
-    <span class="ra-hud-score">
-      {state['total_score']} pts
-    </span>
+    <span class="ra-hud-score">{state['total_score']} pts</span>
   </div>
-  <div class="ra-hud-phase" style="color:{phase_color};">{phase_label}</div>
+  {badge}
 </div>
 """
 
 
 def note_list_html(notes: List[Note]) -> str:
     if not notes:
-        return '<div class="ra-note-empty">노트 없음 - 건반을 눌러 입력하세요</div>'
+        return '<div class="ra-note-empty">Press keys to add notes</div>'
     NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
     names = [f"{NOTE_NAMES[n.pitch % 12]}{n.pitch // 12 - 1}" for n in notes]
     items = "".join(
@@ -832,7 +852,7 @@ def score_bar_html(label: str, value: int, max_val: int, color: str) -> str:
     <span>{label}</span><span>{value}/{max_val}</span>
   </div>
   <div class="ra-score-track">
-    <div style="background:linear-gradient(90deg,{color},#00f3ff);width:{pct}%;height:10px;border-radius:999px;transition:width .4s;"></div>
+    <div style="background:{color};width:{pct}%;height:4px;border-radius:2px;transition:width .4s ease;"></div>
   </div>
 </div>
 """
@@ -848,22 +868,22 @@ def s4_html(state: dict) -> str:
     grade = round_grade(round_total)
 
     bars = (
-        score_bar_html("조성 일관성", exs[-1]["key_consistency"],  300, "#4A9EF5")
-        + score_bar_html("리듬 유사도",  exs[-1]["rhythm_similarity"],300, "#9b59b6")
-        + score_bar_html("모티프 활용",  exs[-1]["motif_usage"],     300, "#2ecc71")
-        + score_bar_html("창의성 보너스",exs[-1]["creativity_bonus"],100, "#f39c12")
+        score_bar_html("Key consistency",  exs[-1]["key_consistency"],   300, "#9B8FD4")
+        + score_bar_html("Rhythm similarity", exs[-1]["rhythm_similarity"],300, "#7B9FD4")
+        + score_bar_html("Motif usage",       exs[-1]["motif_usage"],       300, "#A8D8E8")
+        + score_bar_html("Creativity",        exs[-1]["creativity_bonus"], 100, "#C8C5E8")
     )
     r5_bonus = ""
     if rr["round_num"] == 5 and rr.get("r5_motif_bonus"):
-        r5_bonus = '<div class="ra-r5-bonus">🌟 R5 모티프 보너스 +150점!</div>'
+        r5_bonus = '<div class="ra-r5-bonus">● R5 motif bonus &nbsp;+150</div>'
 
     feedback = exs[-1].get("feedback", "")
     return f"""
 <div class="ra-result-card">
-  <h2 class="ra-result-title">Round {rr['round_num']} 결과</h2>
+  <div class="ra-round-label">Round {rr['round_num']} Result</div>
   <div class="ra-result-grade">{grade}</div>
   <div class="ra-result-total">{round_total} / 1000</div>
-  <div class="ra-result-feedback">"{feedback}"</div>
+  <div class="ra-result-feedback">{feedback}</div>
   {bars}
   {r5_bonus}
 </div>
@@ -895,7 +915,7 @@ def s5_html(state: dict) -> str:
     final_total = summary["total"] + r5_motif_bonus
     grade = grade_from_total(final_total)
 
-    grade_colors = {"S": "#ffd700", "A": "#c0c0c0", "B": "#cd7f32", "C": "#aaaaaa"}
+    grade_colors = {"S": "#FFD27A", "A": "#E8E2F2", "B": "#C8C5E8", "C": "#DCD7F0"}
     gc = grade_colors.get(grade, "#fff")
 
     round_grades_html = " | ".join(
@@ -907,17 +927,25 @@ def s5_html(state: dict) -> str:
     if summary["bonus_score"] or r5_motif_bonus:
         bonus_detail = (
             f'<div class="ra-final-bonus">'
-            f'콤보/조성 보너스: +{summary["bonus_score"]} &nbsp; '
-            f'R5 모티프 보너스: +{r5_motif_bonus}'
+            f'Combo / key bonus &nbsp;+{summary["bonus_score"]} &nbsp;·&nbsp; '
+            f'R5 motif bonus &nbsp;+{r5_motif_bonus}'
             f'</div>'
         )
 
     return f"""
-<div class="ra-final-card">
-  <div class="ra-final-grade" style="color:{gc};">{grade}</div>
-  <div class="ra-final-total">{final_total} / 5000</div>
+<div class="s5-stage">
+  <div class="s5-label">● SESSION COMPLETE</div>
+  <div class="s5-headline">See what technology<br/>can do for music.</div>
+  <div class="s5-grade" style="color:{gc};">{grade}</div>
+  <div class="s5-total">{final_total} <span class="s5-of">/ 5000</span></div>
   {bonus_detail}
-  <div class="ra-final-rounds">{round_grades_html}</div>
+  <div class="s5-rounds">{round_grades_html}</div>
+  <div class="s5-halfsphere"></div>
+  <div class="s5-footer">
+    <span>TERMS</span><span>·</span>
+    <span>COPYRIGHT &copy; RESPONDAI 2026</span><span>·</span>
+    <span>PRIVACY</span>
+  </div>
 </div>
 """
 
@@ -925,61 +953,52 @@ def s5_html(state: dict) -> str:
 # ─── CSS ─────────────────────────────────────────────────────────────────────
 
 APP_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Press+Start+2P&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap');
 
 :root {
-  --bg-0: #07080f;
-  --bg-1: #0d0e18;
-  --panel: rgba(13, 15, 28, 0.92);
-  --line: rgba(188, 19, 254, 0.5);
-  --txt-main: #e9efff;
-  --txt-sub: #9ba9c9;
-  --neon-blue: #00f3ff;
-  --neon-pink: #ff007f;
-  --neon-purple: #bc13fe;
-  --cyber-yellow: #ffe600;
+  --light-bg:    #FAFAF9;
+  --light-h:     #1A1A1A;
+  --light-sub:   #8A8A8A;
+  --light-body:  #6B6B6B;
+  --dark-bg:     #141414;
+  --dark-card:   #1C1C1C;
+  --dark-h:      #F0F0F0;
+  --dark-sub:    #707070;
+  --dark-body:   #666666;
+  --accent:      #9B8FD4;
+  --accent-deep: #7B6FBF;
+  --note-user:   #4A90D9;
+  --note-ai:     #C0544A;
+  --orb-grad: radial-gradient(ellipse at 30% 25%,
+    #DCD7F0 0%,
+    #C8C5E8 18%,
+    #B5E0F0 38%,
+    #7B9FD4 60%,
+    #1A7A8A 82%,
+    #0A4F5E 100%);
 }
 
-html, body {
+html, body, gradio-app {
   height: 100% !important;
   margin: 0 !important;
   overflow: hidden !important;
-  color: var(--txt-main) !important;
-  background:
-    radial-gradient(ellipse 120% 50% at 15% -10%, rgba(0,243,255,0.13) 0%, transparent 60%),
-    radial-gradient(ellipse 100% 45% at 85% 5%,  rgba(255,0,127,0.14) 0%, transparent 58%),
-    radial-gradient(ellipse 80%  60% at 50% 100%, rgba(188,19,254,0.10) 0%, transparent 55%),
-    linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%) !important;
-  font-family: 'Orbitron', 'Apple SD Gothic Neo', 'Nanum Gothic', sans-serif !important;
+  background: var(--light-bg) !important;
+  color: var(--light-h) !important;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+  -webkit-font-smoothing: antialiased !important;
+  transition: background 0.3s ease !important;
 }
-
-/* 사이버펑크 그리드 오버레이 */
-html::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(0,243,255,0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,243,255,0.035) 1px, transparent 1px);
-  background-size: 44px 44px;
-  pointer-events: none;
-  z-index: 0;
-}
-
-/* 스캔라인 오버레이 */
-html::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background: repeating-linear-gradient(
-    0deg,
-    transparent 0px,
-    transparent 3px,
-    rgba(0,0,0,0.06) 3px,
-    rgba(0,0,0,0.06) 4px
-  );
-  pointer-events: none;
-  z-index: 9999;
+/* Auto-switch the outer page background to match the visible panel */
+html:has(.panel-s3:not(.hide)),
+html:has(.panel-s4:not(.hide)),
+html:has(.panel-s5:not(.hide)),
+body:has(.panel-s3:not(.hide)),
+body:has(.panel-s4:not(.hide)),
+body:has(.panel-s5:not(.hide)),
+gradio-app:has(.panel-s3:not(.hide)),
+gradio-app:has(.panel-s4:not(.hide)),
+gradio-app:has(.panel-s5:not(.hide)) {
+  background: #0E0E0E !important;
 }
 .gradio-container {
   max-width: 1000px !important;
@@ -990,13 +1009,13 @@ html::before {
   padding: 6px 10px 8px !important;
   overflow: hidden !important;
   box-sizing: border-box !important;
+  background: transparent !important;
 }
 footer, .footer { display: none !important; }
 #main, .app {
   height: 100% !important;
   overflow: hidden !important;
 }
-.gradio-container, .gradio-container * { color: var(--txt-main); }
 
 /* 건반 브리지: 화면 레이아웃에 안 보이게 (DOM·클릭은 유지) */
 .note-input-layer {
@@ -1028,15 +1047,23 @@ footer, .footer { display: none !important; }
   justify-content: space-between !important;
   box-sizing: border-box !important;
   overflow: auto !important;
-  padding: 10px !important;
-  background: var(--panel) !important;
-  border: 1px solid var(--line) !important;
-  border-radius: 14px !important;
-  box-shadow: 0 0 22px rgba(188,19,254,0.28), inset 0 0 18px rgba(0,243,255,0.07) !important;
-  animation: ra-panel-glow 4s ease-in-out infinite !important;
+  padding: 16px !important;
+  border-radius: 12px !important;
   position: relative !important;
-  z-index: 1 !important;
 }
+/* Light screens: S1, S2 */
+.panel-s1, .panel-s2 {
+  background: var(--light-bg) !important;
+  border: 1px solid rgba(0,0,0,0.07) !important;
+  color: var(--light-h) !important;
+}
+/* Dark screens: S3, S4, S5 */
+.panel-s3, .panel-s4, .panel-s5 {
+  background: var(--dark-bg) !important;
+  border: 1px solid rgba(255,255,255,0.06) !important;
+  color: var(--dark-h) !important;
+}
+.panel-s3 *, .panel-s4 *, .panel-s5 * { color: inherit; }
 .game-stage > .hide {
   display: none !important;
 }
@@ -1054,20 +1081,52 @@ footer, .footer { display: none !important; }
   padding-top: 6px !important;
 }
 .screen-actions:last-of-type { margin-top: 0 !important; }
-.screen-actions button:disabled {
+.screen-actions button:disabled:not(.mode-card) {
   display: none !important;
+}
+.mode-card:disabled {
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+  display: flex !important;
 }
 .quick-notes button { min-width: 1.8rem !important; padding: 3px 4px !important; font-size: 11px !important; }
 .gradio-button, button {
   white-space: nowrap !important;
-  background: linear-gradient(180deg, rgba(40,45,70,.94), rgba(18,20,32,.98)) !important;
-  border: 1px solid rgba(0,243,255,.5) !important;
-  color: #f6fbff !important;
-  box-shadow: 0 0 10px rgba(0,243,255,.26) !important;
+  font-family: 'Inter', -apple-system, sans-serif !important;
+  font-size: 12px !important;
+  font-weight: 400 !important;
+  letter-spacing: 0.3px !important;
+  border-radius: 20px !important;
+  border: 1px solid rgba(0,0,0,0.12) !important;
+  background: #FFFFFF !important;
+  color: var(--light-h) !important;
+  transition: background 0.15s ease, opacity 0.15s ease !important;
+  box-shadow: none !important;
 }
 .gradio-button:hover, button:hover {
-  border-color: rgba(0,243,255,.9) !important;
-  box-shadow: 0 0 16px rgba(0,243,255,.55) !important;
+  opacity: 0.8 !important;
+  box-shadow: none !important;
+}
+button.primary, .primary button, [data-testid="primary"] {
+  background: var(--accent) !important;
+  color: #FFFFFF !important;
+  border: none !important;
+}
+button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
+  background: var(--accent-deep) !important;
+  opacity: 1 !important;
+}
+/* Dark panel buttons */
+.panel-s3 button, .panel-s4 button, .panel-s5 button {
+  background: var(--dark-card) !important;
+  color: var(--dark-h) !important;
+  border: 1px solid rgba(255,255,255,0.1) !important;
+}
+.panel-s3 button.primary, .panel-s4 button.primary, .panel-s5 button.primary,
+.panel-s3 [data-testid="primary"], .panel-s4 [data-testid="primary"], .panel-s5 [data-testid="primary"] {
+  background: var(--accent) !important;
+  color: #FFFFFF !important;
+  border: none !important;
 }
 
 /* S3: 피아노롤만 넓게, 사이드 viz 숨김 */
@@ -1083,41 +1142,179 @@ footer, .footer { display: none !important; }
   max-height: 140px !important;
 }
 
+/* S1 nav (amra-style) */
+.s1-body { padding: 0 !important; }
+.ra-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 22px 28px 18px;
+  border-bottom: none;
+  color: var(--light-h);
+  min-height: 40px;
+}
+.ra-nav-logo {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-size: 22px; font-weight: 500; color: var(--light-h);
+  letter-spacing: -0.4px;
+  line-height: 1;
+  display: inline-flex; align-items: center;
+}
+.ra-nav-links {
+  display: inline-flex; align-items: center; gap: 28px;
+  font-size: 11px; letter-spacing: 1.4px;
+  text-transform: uppercase; color: var(--light-h); font-weight: 500;
+  line-height: 1;
+}
+.ra-nav-links span,
+.ra-nav-links a.ra-nav-link {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+  color: var(--light-h);
+  text-decoration: none;
+  line-height: 1;
+  display: inline-flex; align-items: center;
+}
+.ra-nav-links .ra-nav-link:hover { opacity: 0.55; }
+.ra-nav-cta {
+  font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase;
+  padding: 6px 14px; border-radius: 16px;
+  background: var(--accent); color: #fff;
+  cursor: default;
+}
+
+/* S1 hero */
 .ra-title-wrap {
-  display: flex; flex-direction: column; justify-content: center; align-items: center;
-  text-align: center; min-height: 220px;
-}
-.ra-logo {
-  font-family: 'Press Start 2P', 'Orbitron', monospace;
-  font-size: clamp(28px, 6vw, 52px);
-  color: var(--neon-pink);
-  text-shadow:
-    0 0 8px rgba(255,0,127,0.9),
-    0 0 24px rgba(188,19,254,0.6),
-    0 0 56px rgba(188,19,254,0.25);
-  letter-spacing: 3px;
-  animation: ra-glitch 7s ease-in-out infinite, ra-logo-breathe 3s ease-in-out infinite;
   position: relative;
+  display: flex; flex-direction: column; justify-content: flex-start; align-items: center;
+  text-align: center; padding: 18px 24px 0;
+  min-height: 0;
 }
-.ra-subtitle { margin-top: 14px; font-size: 13px; color: #d6e2ff; opacity: .95; }
-.mode-card { min-height: 52px !important; border-width: 2px !important; }
+.ra-hero-head {
+  font-size: clamp(20px, 3.2vw, 30px);
+  font-weight: 400;
+  color: var(--light-h);
+  letter-spacing: -0.5px;
+  line-height: 1.25;
+  margin-top: 8px;
+}
+.ra-hero-sub {
+  margin-top: 10px;
+  font-size: 13px; font-weight: 300;
+  color: var(--light-sub);
+  line-height: 1.55;
+  max-width: 480px;
+}
+.ra-hero-orb {
+  width: min(380px, 60vh);
+  height: min(380px, 60vh);
+  border-radius: 50%;
+  background: var(--orb-grad);
+  margin: 8px auto 0;
+  pointer-events: none;
+  animation: ra-orb-float 6s ease-in-out infinite;
+}
+@keyframes ra-orb-float {
+  0%, 100% { transform: translateY(0px); }
+  50%      { transform: translateY(-6px); }
+}
+
+/* S1 start buttons → mini-player pill style */
+.s1-actions {
+  justify-content: center !important;
+  gap: 14px !important;
+  padding-bottom: 18px !important;
+}
+.mode-card { min-height: 0 !important; }
+.pill-cta {
+  border-radius: 28px !important;
+  padding: 8px 22px 8px 18px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 12px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  letter-spacing: -0.1px !important;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 200px !important;
+  height: 48px !important;
+  justify-content: flex-start !important;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
+  position: relative !important;
+}
+.s1-actions .pill-cta { min-width: 220px !important; }
+.s2-actions .pill-cta { min-width: 260px !important; }
+.s5-actions .pill-cta { min-width: 200px !important; }
+/* music-note glyph instead of orb thumbnail */
+.pill-cta::before {
+  content: "♪\ufe0e";
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 32px;
+  background: none;
+  border-radius: 0;
+  color: inherit;
+  font-size: 26px;
+  line-height: 1;
+  font-weight: 500;
+  flex: 0 0 22px;
+  font-variant-emoji: text;
+  text-rendering: optimizeLegibility;
+  transform: translateY(-1px);
+}
+.pill-cta::after { display: none !important; }
+.pill-cta-primary,
+button.pill-cta.pill-cta-primary {
+  background: #8B7FC8 !important;
+  border: 1px solid transparent !important;
+  color: #FFFFFF !important;
+  box-shadow: 0 6px 22px rgba(139,127,200,0.32) !important;
+}
+.pill-cta-primary:hover,
+button.pill-cta.pill-cta-primary:hover {
+  background: #7B6FBF !important;
+  opacity: 1 !important;
+}
+.pill-cta-ghost {
+  background: transparent !important;
+  border: 1px solid rgba(0,0,0,0.12) !important;
+  color: var(--light-sub) !important;
+  box-shadow: none !important;
+}
+.pill-cta-ghost-light {
+  background: rgba(255,255,255,0.06) !important;
+  border: 1px solid rgba(255,255,255,0.15) !important;
+  color: var(--dark-h) !important;
+  box-shadow: none !important;
+}
+.pill-cta-ghost:disabled { opacity: 0.4 !important; }
+
+.ra-help-dot { color: var(--accent); margin-right: 6px; }
 
 .ra-round-card, .ra-result-card, .ra-final-card {
   margin: 0 auto; width: min(96%, 640px);
-  background: rgba(10, 14, 28, 0.86);
-  border: 1px solid rgba(188,19,254,.5);
-  border-radius: 14px;
-  padding: 16px 18px;
-  box-shadow: 0 0 20px rgba(188,19,254,.22), inset 0 0 12px rgba(0,243,255,.08);
+  background: var(--dark-card);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 12px;
+  padding: 20px 24px;
+}
+.ra-round-label {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; font-weight: 400; letter-spacing: 2px;
+  text-transform: uppercase; color: var(--accent); margin-bottom: 10px;
+}
+.ra-round-label::before {
+  content: '●'; font-size: 7px; color: var(--accent);
 }
 .ra-round-title, .ra-result-title {
   margin: 0;
-  color: #f5f9ff;
-  font-size: 24px;
-  font-weight: 900;
+  color: var(--dark-h);
+  font-size: 22px;
+  font-weight: 400;
+  letter-spacing: -0.3px;
 }
-.ra-round-meta { margin: 10px 0 6px; color: #dbe6ff; font-size: 17px; }
-.ra-round-cond, .ra-result-feedback { color: #b8c8ed; font-size: 14px; font-style: italic; margin-top: 8px; }
+.ra-round-meta { margin: 10px 0 6px; color: var(--dark-h); font-size: 15px; font-weight: 300; }
+.ra-round-cond, .ra-result-feedback { color: var(--dark-sub); font-size: 13px; font-weight: 400; margin-top: 8px; line-height: 1.6; }
 
 .ra-hud {
   display: grid;
@@ -1126,94 +1323,505 @@ footer, .footer { display: none !important; }
   align-items: center;
   padding: 10px 14px;
   border-radius: 10px;
-  border: 1px solid rgba(0,243,255,.36);
-  background: rgba(10, 16, 32, .92);
-  box-shadow: 0 0 14px rgba(0,243,255,.2), inset 0 0 10px rgba(188,19,254,.1);
+  border: 1px solid rgba(255,255,255,0.07);
+  background: var(--dark-card);
 }
 .ra-hud-group { text-align: center; }
-.ra-hud-round { font-family: 'Press Start 2P', 'Orbitron', monospace; font-size: 12px; color: var(--cyber-yellow); }
-.ra-hud-exchange { margin-left: 10px; color: #e6eeff; font-size: 13px; }
+.ra-hud-round { font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 500; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent); }
+.ra-hud-exchange { margin-left: 10px; color: var(--dark-h); font-size: 12px; font-weight: 300; }
 .ra-chip {
-  display: inline-block; padding: 4px 8px; margin: 0 4px;
-  border-radius: 8px; background: rgba(188,19,254,.12); border: 1px solid rgba(188,19,254,.35);
+  display: inline-block; padding: 3px 8px; margin: 0 4px;
+  border-radius: 12px; background: rgba(155,143,212,0.12); border: 1px solid rgba(155,143,212,0.25);
+  color: var(--accent); font-size: 11px;
 }
-.ra-hud-score { font-size: 20px; font-weight: 900; color: var(--cyber-yellow); text-shadow: 0 0 10px rgba(255,230,0,.28); }
-.ra-hud-phase { font-weight: 700; text-align: center; }
+.ra-hud-score { font-size: 18px; font-weight: 400; color: var(--dark-h); }
+.ra-hud-phase { font-weight: 400; text-align: center; font-size: 12px; color: var(--dark-sub); }
+
+/* Turn badge */
+.ra-turn-badge {
+  font-family: 'Inter', sans-serif;
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 1px;
+  padding: 6px 14px;
+  border-radius: 20px;
+  text-align: center;
+  text-transform: uppercase;
+  animation: ra-turn-pop 0.35s ease-out;
+}
+.ra-turn-player {
+  background: rgba(155,143,212,0.12);
+  border: 1px solid rgba(155,143,212,0.35);
+  color: var(--accent);
+}
+.ra-turn-ai {
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.15);
+  color: var(--dark-h);
+}
+.ra-turn-result {
+  background: rgba(155,143,212,0.08);
+  border: 1px solid rgba(155,143,212,0.2);
+  color: var(--dark-sub);
+}
+@keyframes ra-turn-pop {
+  0%   { transform: translateY(4px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+/* S3 버튼 왼쪽 그룹 */
+.s3-btn-left {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 4px !important;
+  flex: 0 0 auto !important;
+  min-width: 86px !important;
+  max-width: 100px !important;
+}
+.s3-btn-left button { flex: 1 !important; min-height: 32px !important; font-size: 12px !important; }
+
+/* 건반 단축키 레이블 */
+.ra-key-shortcut {
+  font-size: 9px;
+  color: rgba(80,80,80,0.7);
+  pointer-events: none;
+  line-height: 1.2;
+  text-align: center;
+  margin-bottom: 2px;
+  font-family: 'Inter', monospace;
+  white-space: nowrap;
+}
+.ra-key-shortcut-black {
+  color: rgba(220,220,220,0.7);
+  font-size: 8px;
+}
+
+/* Round done 메시지 */
+.ra-round-done {
+  text-align: center;
+  font-size: 14px;
+  font-weight: 300;
+  color: var(--dark-h);
+  padding: 14px;
+  border: 1px solid rgba(155,143,212,0.25);
+  border-radius: 10px;
+  background: rgba(155,143,212,0.06);
+  margin: 8px 0;
+  animation: ra-turn-pop 0.35s ease-out;
+}
+
+/* S2 카드 크기 증가 */
+.ra-round-card {
+  padding: 28px 24px !important;
+}
+.ra-round-title { font-size: 28px !important; }
+.ra-round-meta  { font-size: 17px !important; margin: 14px 0 10px !important; }
+.ra-round-cond  { font-size: 14px !important; margin-top: 12px !important; }
+
+/* S2 layout (Round info card with subtle orb) */
+.s2-wrap {
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  padding: 24px 20px 0;
+  position: relative;
+}
+.s2-headline {
+  font-size: clamp(26px, 4vw, 38px);
+  font-weight: 400; letter-spacing: -0.5px;
+  color: var(--light-h);
+  margin-top: 6px;
+}
+.s2-meta {
+  font-size: 14px; font-weight: 300;
+  color: var(--light-sub);
+  letter-spacing: 1px; text-transform: uppercase;
+  margin-top: 4px;
+}
+.s2-cond {
+  margin-top: 14px;
+  font-size: 13px; font-weight: 400;
+  color: var(--light-body);
+  max-width: 460px; line-height: 1.6;
+}
+.s2-orb {
+  width: min(240px, 42vh) !important;
+  height: min(240px, 42vh) !important;
+  margin-top: 20px !important;
+}
+.s2-actions {
+  justify-content: center !important;
+  padding-bottom: 24px !important;
+}
+
+/* S5 — game over (image 5) */
+.panel-s5 {
+  padding: 0 !important;
+  background: #0E0E0E !important;
+  border: none !important;
+  overflow: hidden !important;
+  position: relative !important;
+}
+.panel-s5::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -88%;
+  transform: translateX(-50%);
+  width: min(560px, 72%);
+  aspect-ratio: 1 / 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 32%,
+    #F4F1FB 0%,
+    #DCD7F0 12%,
+    #C8C5E8 26%,
+    #B5E0F0 42%,
+    #7B9FD4 58%,
+    rgba(26,122,138,0.55) 74%,
+    rgba(13,92,106,0.0) 88%);
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.95;
+}
+.panel-s5 > * { position: relative; z-index: 1; }
+.s5-roll-hidden { display: none !important; }
+.s5-body {
+  position: relative !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+}
+.s5-stage {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center;
+  width: 100%; min-height: 100%;
+  background: transparent;
+  padding: 32px 24px 24px;
+  box-sizing: border-box;
+  text-shadow: 0 2px 18px rgba(14,14,14,0.55);
+}
+.s5-grade { text-shadow: 0 3px 22px rgba(14,14,14,0.7) !important; }
+.s5-label {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.s5-headline {
+  margin-top: 16px;
+  font-size: clamp(20px, 3vw, 28px);
+  font-weight: 400;
+  letter-spacing: -0.3px;
+  line-height: 1.3;
+  color: #F0F0F0;
+  text-align: center;
+}
+.s5-grade {
+  margin-top: 14px;
+  font-size: 64px;
+  font-weight: 300;
+  letter-spacing: 6px;
+  line-height: 1;
+}
+.s5-total {
+  margin-top: 6px;
+  font-size: 18px; font-weight: 300;
+  color: #B8B8B8;
+}
+.s5-of { color: #6B6B6B; }
+.s5-rounds {
+  margin-top: 18px;
+  font-size: 11px; font-weight: 400;
+  letter-spacing: 1.5px; text-transform: uppercase;
+  color: var(--dark-sub);
+}
+.s5-halfsphere {
+  position: absolute;
+  left: 50%;
+  bottom: -64%;
+  transform: translateX(-50%);
+  width: min(1100px, 180%);
+  height: min(1100px, 180%);
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 25%,
+    #F4F1FB 0%,
+    #DCD7F0 12%,
+    #C8C5E8 24%,
+    #B5E0F0 40%,
+    #7B9FD4 58%,
+    #1A7A8A 76%,
+    rgba(13,92,106,0.0) 92%);
+  filter: blur(0.3px);
+  pointer-events: none;
+  z-index: 0;
+}
+.s5-stage > * { position: relative; z-index: 1; }
+.s5-footer {
+  position: relative;
+  margin-top: 22px;
+  display: flex; justify-content: center; gap: 14px;
+  font-size: 9px; letter-spacing: 2px;
+  color: #767676;
+  z-index: 2;
+}
+.s5-footer span { white-space: nowrap; }
+.s5-actions {
+  position: relative !important;
+  z-index: 3 !important;
+  padding: 16px 24px 30px !important;
+  justify-content: center !important;
+  background: transparent !important;
+}
+.s5-actions .pill-cta {
+  background: rgba(255,255,255,0.08) !important;
+  border: 1px solid rgba(255,255,255,0.15) !important;
+  color: #F0F0F0 !important;
+}
+.s5-actions .pill-cta:hover {
+  background: rgba(255,255,255,0.14) !important;
+  opacity: 1 !important;
+}
+.panel-s5 .ra-final-bonus {
+  position: relative; z-index: 2;
+  color: var(--dark-sub); font-size: 11px;
+  margin-top: 8px; letter-spacing: 0.5px;
+}
 
 .ra-piano-wrap {
   user-select: none; padding: 10px 8px; border-radius: 10px; text-align: center;
-  background: rgba(10, 14, 26, 0.9); border: 1px solid rgba(0,243,255,.26);
+  background: var(--dark-card); border: 1px solid rgba(255,255,255,0.08);
 }
-.ra-piano-help { color: #d8e3ff; font-size: 11px; margin-bottom: 8px; line-height: 1.65; }
+.ra-piano-help { color: var(--dark-sub); font-size: 11px; margin-bottom: 8px; line-height: 1.65; }
 .ra-piano-help kbd {
-  background: rgba(30, 36, 56, 0.95); color: #f6fbff; border: 1px solid rgba(0,243,255,.3);
+  background: rgba(255,255,255,0.06); color: var(--dark-h); border: 1px solid rgba(255,255,255,0.15);
   padding: 1px 5px; border-radius: 4px; font-size: 10px;
 }
 .ra-piano-keys { display: inline-block; position: relative; }
-.ra-key { transition: transform .08s ease, box-shadow .12s ease, filter .12s ease; }
+.ra-key { transition: transform .08s ease, opacity .12s ease; }
 .ra-key-white {
-  background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(224,232,247,.9));
-  border: 1px solid #5f6c8d;
+  background: #F4F4F2;
+  border: 1px solid #C8C8C6;
   border-radius: 0 0 6px 6px;
 }
 .ra-key-black {
-  background: linear-gradient(180deg, #262b39, #090b12);
+  background: #181818;
   border: 1px solid #000;
-  box-shadow: inset 0 -8px 10px rgba(0,0,0,.35);
+  box-shadow: inset 0 -6px 8px rgba(0,0,0,.4);
 }
 .ra-key.active {
   transform: translateY(2px) scale(0.99);
-  box-shadow: 0 0 16px rgba(0,243,255,.92), inset 0 0 10px rgba(0,243,255,.6);
-  filter: brightness(1.16);
+  background: var(--accent) !important;
+  opacity: 0.85;
 }
-.ra-key-label { font-size: 8px; color: #5a6685; pointer-events: none; }
+.ra-key-label { font-size: 8px; color: #8A8A8A; pointer-events: none; }
 
-.ra-note-empty { color: #d3def6; font-size: 12px; padding: 6px; }
+.ra-note-empty { color: var(--dark-sub); font-size: 12px; padding: 6px; }
 .ra-note-list { display: flex; flex-wrap: wrap; padding: 4px; align-items: center; }
 .ra-note-chip {
-  background: rgba(0,243,255,.14); border: 1px solid rgba(0,243,255,.52);
-  border-radius: 999px; padding: 2px 8px; margin: 2px; font-size: 12px; color: #ebf8ff;
+  background: rgba(155,143,212,0.1); border: 1px solid rgba(155,143,212,0.3);
+  border-radius: 999px; padding: 2px 8px; margin: 2px; font-size: 12px; color: var(--accent);
 }
-.ra-note-count { color: #b7c5e9; font-size: 11px; margin: 4px; }
+.ra-note-count { color: var(--dark-sub); font-size: 11px; margin: 4px; }
 
 .ra-score-row { margin: 6px 0; }
-.ra-score-head { display: flex; justify-content: space-between; font-size: 12px; color: #dce8ff; margin-bottom: 3px; }
-.ra-score-track { background: rgba(24, 32, 58, 0.98); border-radius: 999px; height: 10px; border: 1px solid rgba(188,19,254,.32); }
-.ra-result-grade { font-size: 24px; margin: 8px 0 2px; color: #f7fbff; text-shadow: 0 0 12px rgba(188,19,254,.45); }
-.ra-result-total { font-size: 19px; color: var(--cyber-yellow); margin-bottom: 9px; }
-.ra-r5-bonus { color: #ffe873; font-size: 14px; margin-top: 10px; text-shadow: 0 0 10px rgba(255,230,0,.35); }
+.ra-score-head { display: flex; justify-content: space-between; font-size: 12px; font-weight: 400; color: var(--dark-sub); margin-bottom: 4px; }
+.ra-score-track { background: rgba(255,255,255,0.07); border-radius: 999px; height: 4px; border: none; }
+.ra-result-grade {
+  font-size: 28px; font-weight: 300; letter-spacing: 4px;
+  margin: 12px 0 2px; color: var(--dark-h);
+}
+.ra-result-total {
+  font-size: 16px; font-weight: 300;
+  color: var(--dark-sub); margin-bottom: 14px;
+  letter-spacing: 0.5px;
+}
+.ra-r5-bonus {
+  color: var(--accent); font-size: 11px;
+  letter-spacing: 2px; text-transform: uppercase;
+  margin-top: 12px;
+}
+.ra-result-feedback {
+  font-style: normal !important;
+}
+.ra-result-feedback::before {
+  content: '— ';
+  color: var(--accent);
+}
+.ra-round-done-cta {
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-size: 11px;
+}
 
-.ra-final-card { text-align: center; }
-.ra-final-grade {
-  font-size: 56px; font-weight: 900; letter-spacing: 4px;
-  text-shadow: 0 0 14px currentColor, 0 0 32px rgba(188,19,254,.38);
-  animation: ra-pulse 1.8s ease-in-out infinite;
+/* In-game pill button (S3/S4/S5) — white pill, black icon, dark text */
+.game-pill {
+  background: #FFFFFF !important;
+  color: var(--light-h) !important;
+  border: 1px solid rgba(0,0,0,0.06) !important;
+  border-radius: 999px !important;
+  padding: 10px 22px 10px 18px !important;
+  font-size: 13.5px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.1px !important;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.10) !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 10px !important;
+  min-width: 0 !important;
+  width: auto !important;
+  height: auto !important;
+  min-height: 40px !important;
+  white-space: nowrap !important;
+  font-variant-emoji: text;
+  text-rendering: optimizeLegibility;
+  transition: background 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease !important;
 }
-.ra-final-total { font-size: 28px; color: var(--cyber-yellow); margin: 8px 0; }
-.ra-final-bonus { color: #baff9a; font-size: 13px; margin-top: 6px; }
-.ra-final-rounds { font-size: 13px; color: #d3dfff; margin-top: 12px; }
-@keyframes ra-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.04); opacity: 0.92; }
+.game-pill:hover:not(:disabled) {
+  background: #FFFFFF !important;
+  opacity: 0.92 !important;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.14) !important;
+}
+.game-pill:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+.game-pill-sm {
+  padding: 7px 16px 7px 12px !important;
+  font-size: 12px !important;
+  gap: 7px !important;
+  min-height: 30px !important;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08) !important;
+}
+/* Force white pill style even inside dark panels (overrides earlier dark-button rule) */
+.panel-s3 .game-pill,
+.panel-s4 .game-pill,
+.panel-s5 .game-pill {
+  background: #FFFFFF !important;
+  color: var(--light-h) !important;
+  border: 1px solid rgba(0,0,0,0.06) !important;
+}
+/* The leading character before the double-space acts as the icon — keep it boldly black */
+.game-pill { color: #0E0E0E !important; }
+/* Primary in-game pill — same white pill, just slightly heavier weight + softer shadow */
+.game-pill-primary {
+  font-weight: 600 !important;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.14) !important;
+}
+.game-pill-primary:hover:not(:disabled) {
+  box-shadow: 0 8px 26px rgba(0,0,0,0.18) !important;
 }
 
-@keyframes ra-panel-glow {
-  0%, 100% { box-shadow: 0 0 22px rgba(188,19,254,0.28), inset 0 0 18px rgba(0,243,255,0.07); }
-  50%       { box-shadow: 0 0 38px rgba(0,243,255,0.32), inset 0 0 22px rgba(188,19,254,0.10); }
+/* Modals (S1 nav popups) */
+.ra-modal {
+  position: fixed; inset: 0;
+  display: none;
+  align-items: center; justify-content: center;
+  background: rgba(20, 22, 32, 0.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 9999;
+  padding: 24px;
+  box-sizing: border-box;
+  animation: ra-modal-fade 0.18s ease-out;
 }
-
-@keyframes ra-logo-breathe {
-  0%, 100% { text-shadow: 0 0 8px rgba(255,0,127,0.9), 0 0 24px rgba(188,19,254,0.6), 0 0 56px rgba(188,19,254,0.25); }
-  50%       { text-shadow: 0 0 16px rgba(255,0,127,1.0), 0 0 40px rgba(188,19,254,0.9), 0 0 80px rgba(0,243,255,0.35); }
+.ra-modal.open { display: flex; }
+@keyframes ra-modal-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
-
-@keyframes ra-glitch {
-  0%, 85%, 100% { transform: none; clip-path: none; color: var(--neon-pink); }
-  86% { transform: translate(-4px, 0) skewX(-2deg); clip-path: polygon(0 15%, 100% 15%, 100% 45%, 0 45%); color: var(--neon-blue); }
-  87% { transform: translate(4px, 0)  skewX( 2deg); clip-path: polygon(0 55%, 100% 55%, 100% 80%, 0 80%); color: var(--neon-pink); }
-  88% { transform: translate(-2px, 0); clip-path: polygon(0 30%, 100% 30%, 100% 60%, 0 60%); color: #fff; }
-  89% { transform: none; clip-path: none; color: var(--neon-pink); }
+.ra-modal-card {
+  width: min(560px, 100%);
+  max-height: 88vh;
+  overflow: auto;
+  background: #FFFFFF;
+  border-radius: 18px;
+  padding: 28px 30px 26px;
+  box-shadow: 0 24px 80px rgba(0,0,0,0.18);
+  position: relative;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Nanum Gothic', sans-serif;
+  color: var(--light-h);
+  animation: ra-modal-pop 0.22s cubic-bezier(0.2, 0.7, 0.3, 1);
 }
+@keyframes ra-modal-pop {
+  from { transform: translateY(10px); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.ra-modal-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.ra-modal-eyebrow {
+  font-size: 10px; font-weight: 500;
+  letter-spacing: 2.4px; text-transform: uppercase;
+  color: var(--accent);
+}
+.ra-modal-close {
+  background: transparent !important;
+  border: none !important;
+  color: var(--light-sub) !important;
+  font-size: 22px !important;
+  line-height: 1 !important;
+  padding: 4px 8px !important;
+  margin: -4px -8px 0 0 !important;
+  cursor: pointer !important;
+  border-radius: 50% !important;
+  width: auto !important; min-width: 0 !important; height: auto !important;
+  box-shadow: none !important;
+  transition: color 0.15s ease, background 0.15s ease !important;
+}
+.ra-modal-close:hover {
+  color: var(--light-h) !important;
+  background: rgba(0,0,0,0.04) !important;
+  opacity: 1 !important;
+}
+.ra-modal-title {
+  margin: 4px 0 14px;
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.3px;
+  color: var(--light-h);
+}
+.ra-modal-body {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--light-body);
+}
+.ra-modal-body p { margin: 0 0 12px; }
+.ra-modal-body b { color: var(--light-h); font-weight: 500; }
+.ra-modal-list {
+  margin: 6px 0 14px;
+  padding-left: 20px;
+}
+.ra-modal-list li { margin-bottom: 8px; }
+.ra-modal-list-bullets { list-style: none; padding-left: 0; }
+.ra-modal-list-bullets li {
+  position: relative;
+  padding-left: 16px;
+}
+.ra-modal-list-bullets li::before {
+  content: '●';
+  position: absolute; left: 0; top: 0;
+  color: var(--accent);
+  font-size: 7px;
+  line-height: 1.8;
+}
+.ra-modal-body kbd {
+  display: inline-block;
+  background: #F2F1ED;
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-family: 'Inter', monospace;
+  color: var(--light-h);
+  margin: 0 1px;
+}
+.ra-modal-foot {
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--light-sub);
+  font-style: normal;
+}
+.ra-modal-locked { overflow: hidden !important; }
 """
 
 
@@ -1239,37 +1847,82 @@ with gr.Blocks(title="RespondAI") as app:
 
     with gr.Column(visible=True, elem_classes=["game-stage"]):
         # ── S1: Title ────────────────────────────────────────────────────────
-        with gr.Column(visible=True, elem_classes=["game-panel"]) as screen_s1:
-            with gr.Column(elem_classes=["screen-body"]):
+        with gr.Column(visible=True, elem_classes=["game-panel", "panel-s1"]) as screen_s1:
+            with gr.Column(elem_classes=["screen-body", "s1-body"]):
                 gr.HTML("""
-<div class="ra-title-wrap">
-  <div style="font-family:'Press Start 2P',monospace;font-size:10px;color:rgba(0,243,255,0.5);
-              letter-spacing:6px;margin-bottom:18px;text-transform:uppercase;">
-    ◈ MUSIC BATTLE ◈
+<nav class="ra-nav">
+  <div class="ra-nav-logo">respondai</div>
+  <div class="ra-nav-links">
+    <span class="ra-nav-link" onclick="window.respondAIModal && window.respondAIModal.open('howto')">HOW TO PLAY</span>
+    <a class="ra-nav-link" href="https://github.com/yolemonade/respondai" target="_blank" rel="noopener noreferrer">GITHUB</a>
+    <span class="ra-nav-link" onclick="window.respondAIModal && window.respondAIModal.open('devs')">DEVELOPERS</span>
   </div>
-  <div class="ra-logo">RespondAI</div>
-  <div class="ra-subtitle">AI와 함께하는 즉흥 연주 세션</div>
-  <div style="margin-top:20px;display:flex;align-items:center;gap:10px;justify-content:center;">
-    <div style="height:1px;width:60px;background:linear-gradient(90deg,transparent,rgba(0,243,255,0.6));"></div>
-    <span style="font-size:10px;color:rgba(0,243,255,0.45);letter-spacing:4px;">CALL &amp; RESPONSE</span>
-    <div style="height:1px;width:60px;background:linear-gradient(90deg,rgba(0,243,255,0.6),transparent);"></div>
+</nav>
+<div class="ra-title-wrap">
+  <div class="ra-hero-head">A call &amp; response with AI</div>
+  <div class="ra-hero-sub">The only piano session built for<br/>spontaneous improvisation between you and a model.</div>
+  <div class="ra-hero-orb"></div>
+</div>
+
+<!-- Modals (S1 only) -->
+<div class="ra-modal" id="ra-modal-howto" onclick="if(event.target===this) window.respondAIModal.close()">
+  <div class="ra-modal-card" role="dialog" aria-labelledby="ra-modal-howto-title">
+    <div class="ra-modal-head">
+      <span class="ra-modal-eyebrow">● HOW TO PLAY</span>
+      <button type="button" class="ra-modal-close" onclick="window.respondAIModal.close()" aria-label="Close">×</button>
+    </div>
+    <h2 id="ra-modal-howto-title" class="ra-modal-title">How to play</h2>
+    <div class="ra-modal-body">
+      <p>RespondAI는 AI와 번갈아 짧은 멜로디를 주고받는 즉흥 연주 세션 게임입니다.</p>
+      <ol class="ra-modal-list">
+        <li><b>세션 시작</b> — “Start session” 버튼을 누르면 무작위로 조성(Key)과 BPM이 정해집니다.</li>
+        <li><b>나의 차례</b> — 화면 가상 건반을 마우스로 누르거나, 키보드 <kbd>A S D F G H J K L</kbd> (흰 건반), <kbd>W E R T Y U I O</kbd> (검은 건반)으로 노트를 입력합니다. <kbd>Backspace</kbd>로 마지막 노트 취소, <kbd>Shift + ↑/↓</kbd>로 옥타브 변경, <kbd>Enter</kbd>로 확정합니다.</li>
+        <li><b>AI 응답</b> — 내 멜로디를 듣고 AI가 응답을 생성·연주합니다.</li>
+        <li><b>교환 반복</b> — 한 라운드당 3번 주고받습니다. 라운드가 끝나면 조성 일관성·리듬 유사도·모티프 활용·창의성 보너스 4가지 기준으로 점수가 계산됩니다.</li>
+        <li><b>최종 결과</b> — 모든 라운드가 끝나면 누적 점수와 등급(S/A/B/C)이 나옵니다. 1라운드 첫 멜로디를 마지막 라운드에서 다시 사용하면 모티프 보너스 +150점이 추가됩니다.</li>
+      </ol>
+      <p class="ra-modal-foot">팁: 너무 길게 연주하지 마세요. 짧고 분명한 모티프가 좋은 응답을 만듭니다.</p>
+    </div>
+  </div>
+</div>
+
+<div class="ra-modal" id="ra-modal-devs" onclick="if(event.target===this) window.respondAIModal.close()">
+  <div class="ra-modal-card" role="dialog" aria-labelledby="ra-modal-devs-title">
+    <div class="ra-modal-head">
+      <span class="ra-modal-eyebrow">● DEVELOPERS</span>
+      <button type="button" class="ra-modal-close" onclick="window.respondAIModal.close()" aria-label="Close">×</button>
+    </div>
+    <h2 id="ra-modal-devs-title" class="ra-modal-title">Developers</h2>
+    <div class="ra-modal-body">
+      <p>RespondAI는 음악 AI와 사람의 즉흥 인터랙션을 탐구하는 학생 프로젝트입니다.</p>
+      <ul class="ra-modal-list ra-modal-list-bullets">
+        <li><b>Team A — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
+        <li><b>Team B — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
+      </ul>
+      <p class="ra-modal-foot">코드와 자세한 문서는 상단의 GitHub 링크에서 확인하세요.</p>
+    </div>
   </div>
 </div>
 """)
-            with gr.Row(equal_height=True, elem_classes=["screen-actions"]):
-                btn_piano_start  = gr.Button("🎹 피아노 모드 시작", variant="primary", scale=2, elem_classes=["mode-card"])
-                btn_humming_start = gr.Button("🎤 허밍 모드 (Beta)", variant="secondary",
-                                              scale=1, interactive=False, elem_classes=["mode-card"])
+            with gr.Row(equal_height=True, elem_classes=["screen-actions", "s1-actions"]):
+                btn_piano_start  = gr.Button("Start session", variant="primary", scale=0,
+                                             elem_classes=["mode-card", "pill-cta", "pill-cta-primary"],
+                                             elem_id="btn-piano-start")
+                btn_humming_start = gr.Button("Humming mode", variant="secondary", scale=0,
+                                              interactive=False,
+                                              elem_classes=["mode-card", "pill-cta", "pill-cta-ghost"],
+                                              elem_id="btn-humming-start")
 
         # ── S2: Round start ──────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s2:
+        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s2"]) as screen_s2:
             with gr.Column(elem_classes=["screen-body"]):
                 s2_info = gr.HTML()
-            with gr.Row(elem_classes=["screen-actions"]):
-                btn_round_start = gr.Button("▶ 시작", variant="primary")
+            with gr.Row(elem_classes=["screen-actions", "s2-actions"]):
+                btn_round_start = gr.Button("Begin round", variant="primary",
+                                            elem_classes=["pill-cta", "pill-cta-primary"])
 
         # ── S3: Main game ────────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s3:
+        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s3"]) as screen_s3:
             with gr.Column(elem_classes=["screen-body", "s3-main"]):
                 s3_hud_html  = gr.HTML()
                 with gr.Row():
@@ -1281,29 +1934,38 @@ with gr.Blocks(title="RespondAI") as app:
                 s3_note_list = gr.HTML(note_list_html([]))
                 s3_audio     = gr.Audio(label="", autoplay=True, visible=False, elem_id="s3-exchange-audio")
             with gr.Row(elem_classes=["screen-actions"]):
-                btn_cancel   = gr.Button("← 취소", scale=1)
-                btn_preview  = gr.Button("▶ 미리듣기", scale=1)
-                btn_confirm  = gr.Button("✅ 확정 (Enter)", scale=2, variant="primary", elem_id="btn-confirm")
-                btn_next_inline = gr.Button("다음 라운드 →", variant="primary", interactive=False, elem_id="btn-next-inline")
-                btn_restart_inline = gr.Button("🔄 다시하기", variant="secondary", interactive=False, elem_id="btn-restart-inline")
+                with gr.Column(scale=1, min_width=90, elem_classes=["s3-btn-left"]):
+                    btn_cancel  = gr.Button("↺  Undo", size="sm",
+                                            elem_classes=["game-pill", "game-pill-sm"])
+                    btn_preview = gr.Button("♪\ufe0e  Preview", size="sm",
+                                            elem_classes=["game-pill", "game-pill-sm"])
+                btn_confirm     = gr.Button("★\ufe0e  Confirm  (Enter)", scale=3,
+                                            elem_id="btn-confirm",
+                                            elem_classes=["game-pill", "game-pill-primary"])
+                btn_next_inline = gr.Button("☁\ufe0e  See result", scale=2,
+                                            interactive=False, elem_id="btn-next-inline",
+                                            elem_classes=["game-pill"])
+                btn_restart_inline = gr.Button("↻  Play again", scale=2,
+                                               interactive=False, elem_id="btn-restart-inline",
+                                               elem_classes=["game-pill"])
 
         # ── S4: Round result ─────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s4:
+        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s4"]) as screen_s4:
             with gr.Column(elem_classes=["screen-body"]):
                 s4_result_html = gr.HTML()
-                with gr.Column(elem_classes=["piano-roll-host"]):
-                    s4_roll = gr.Plot(show_label=False)
             with gr.Row(elem_classes=["screen-actions"]):
-                btn_next_round = gr.Button("다음 라운드 →", variant="primary")
+                btn_next_round = gr.Button("♥\ufe0e  Next round", scale=2,
+                                           elem_classes=["game-pill", "game-pill-primary"])
 
         # ── S5: Final result ─────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel"]) as screen_s5:
-            with gr.Column(elem_classes=["screen-body"]):
+        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s5"]) as screen_s5:
+            with gr.Column(elem_classes=["screen-body", "s5-body"]):
                 s5_result_html = gr.HTML()
-                with gr.Column(elem_classes=["piano-roll-host"]):
+                with gr.Column(elem_classes=["piano-roll-host", "s5-roll-hidden"]):
                     s5_roll = gr.Plot(show_label=False)
-            with gr.Row(elem_classes=["screen-actions"]):
-                btn_restart = gr.Button("🔄 다시하기", variant="secondary")
+            with gr.Row(elem_classes=["screen-actions", "s5-actions"]):
+                btn_restart = gr.Button("↻  Play again",
+                                        elem_classes=["game-pill", "game-pill-primary"])
 
     # 건반 브리지 (Blocks 맨 끝 + 화면 밖 배치)
     _note_names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
@@ -1323,16 +1985,12 @@ with gr.Blocks(title="RespondAI") as app:
         rnd = st["round"]
         cond = ROUND_CONDITIONS[rnd]
         return f"""
-<div class="ra-round-card">
-  <div class="ra-round-title">
-    Round {rnd} / {TOTAL_ROUNDS}
-  </div>
-  <div class="ra-round-meta">
-    🎼 {st['key']} &nbsp;&nbsp; ♩ {st['bpm']} BPM
-  </div>
-  <div class="ra-round-cond">
-    "{cond}"
-  </div>
+<div class="s2-wrap">
+  <div class="ra-round-label">● ROUND {rnd} OF {TOTAL_ROUNDS}</div>
+  <div class="s2-headline">{st['key']}</div>
+  <div class="s2-meta">{st['bpm']} BPM</div>
+  <div class="s2-cond">{cond}</div>
+  <div class="ra-hero-orb s2-orb"></div>
 </div>
 """
 
@@ -1542,22 +2200,23 @@ with gr.Blocks(title="RespondAI") as app:
         is_final = st["round"] >= TOTAL_ROUNDS
         if is_final:
             st["phase"] = "game_over"
-            result_html = s5_html(st)
-        else:
-            result_html = s4_html(st)
+        done_msg = (
+            '<div class="ra-round-done">'
+            '<span class="ra-help-dot">●</span> AI response complete &nbsp;'
+            '<span class="ra-round-done-cta">Press “See result”</span>'
+            '</div>'
+        )
         return (
             st,
-            render_full_history_roll(st["round_results"]),
-            result_html,
-            hud_html(st),
+            render_piano_roll(st), done_msg, hud_html(st),
             render_energy_svg([], "player"),
-            render_energy_svg([], "ai"),
+            render_energy_svg(st["ai_notes"], "ai", attn_scores),
             gr.update(value=""),
             gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
-            gr.update(interactive=not is_final),
-            gr.update(interactive=is_final),
+            gr.update(interactive=True),   # 결과 보기 → 버튼 활성화
+            gr.update(interactive=False),
             audio_up,
         )
 
@@ -1566,10 +2225,8 @@ with gr.Blocks(title="RespondAI") as app:
     )
     confirm_chain.then(fn=None, js=FOCUS_GAME_JS)
 
-    def on_next_round_state(st):
-        if st["round"] >= TOTAL_ROUNDS:
-            st["phase"] = "game_over"
-            return st, *_screens("S5")
+    # S4 "다음 라운드" → S2
+    def on_next_round_s4(st):
         st["round"] += 1
         st["exchange"] = 1
         st["exchange_log"] = []
@@ -1580,7 +2237,22 @@ with gr.Blocks(title="RespondAI") as app:
         st["bpm"] = random.choice(BPM_CHOICES)
         return st, *_screens("S2")
 
-    def on_next_round_ui(st):
+    btn_next_round.click(
+        on_next_round_s4, inputs=[state],
+        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    ).then(
+        lambda st: (_s2_info_html(st), *_screens("S2")),
+        inputs=[state],
+        outputs=[s2_info, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+    )
+
+    # S3 "결과 보기" → S4 (비최종) 또는 S5 (최종)
+    def on_show_result(st):
+        if st["phase"] == "game_over":
+            return st, *_screens("S5")
+        return st, *_screens("S4")
+
+    def on_show_result_ui(st):
         if st["phase"] == "game_over":
             return (
                 gr.update(),
@@ -1589,27 +2261,17 @@ with gr.Blocks(title="RespondAI") as app:
                 *_screens("S5"),
             )
         return (
-            _s2_info_html(st),
-            gr.update(),
-            gr.update(),
-            *_screens("S2"),
+            s4_html(st),
+            gr.update(), gr.update(),
+            *_screens("S4"),
         )
 
-    btn_next_round.click(
-        on_next_round_state, inputs=[state],
-        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    ).then(
-        on_next_round_ui, inputs=[state],
-        outputs=[s2_info, s5_result_html, s5_roll,
-                 screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    )
-
     btn_next_inline.click(
-        on_next_round_state, inputs=[state],
+        on_show_result, inputs=[state],
         outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
     ).then(
-        on_next_round_ui, inputs=[state],
-        outputs=[s2_info, s5_result_html, s5_roll,
+        on_show_result_ui, inputs=[state],
+        outputs=[s4_result_html, s5_result_html, s5_roll,
                  screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
     )
 
