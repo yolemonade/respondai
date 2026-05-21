@@ -73,10 +73,13 @@ KB_BLACK_SEMIS = [1, 3, 6, 8, 10, 13, 15, 18]            # C#4..F#5
 KB_ALLOWED_MIDIS = sorted({60 + s for s in (KB_WHITE_SEMIS + KB_BLACK_SEMIS)})
 
 # 건반 위에 표시할 키보드 단축키 레이블 (영문/한글)
+# 흰 a(60) s(62) d(64) f(65) g(67) h(69) j(71) k(72) l(74)
+# 검 w(61) e(63) r(66) t(68) y(70) u(73) i(75) o(78)
 MIDI_KEY_LABEL = {
-    60:"A/ㅁ", 61:"W/ㅈ", 62:"S/ㄴ", 63:"E/ㄷ", 64:"D/ㅇ",
-    65:"F/ㄹ", 66:"T/ㅌ", 67:"G/ㅎ", 68:"Y/ㅛ", 69:"H/ㅅ",
-    70:"U/ㅕ", 71:"J/ㅑ", 72:"K/ㅐ", 74:"L/ㅣ",
+    60: "A/ㅁ", 61: "W/ㅈ", 62: "S/ㄴ", 63: "E/ㄷ", 64: "D/ㅇ",
+    65: "F/ㄹ", 66: "R/ㄱ", 67: "G/ㅎ", 68: "T/ㅅ", 69: "H/ㅗ",
+    70: "Y/ㅛ", 71: "J/ㅓ", 72: "K/ㅏ", 73: "U/ㅕ", 74: "L/ㅣ",
+    75: "I/ㅑ", 78: "O/ㅐ",
 }
 
 
@@ -698,6 +701,81 @@ KEYBOARD_JS = """() => {
     activeKeys.delete(keyToken(e));
   }, true);
 
+  /* ─── Hero orbit controller — mouse-distance based parallax spin ─── */
+  (function setupOrbit() {
+    function attach() {
+      const cosmos = document.querySelector('.ra-hero-cosmos');
+      if (!cosmos) return false;
+      const outer = cosmos.querySelector('.ra-orbit-outer');
+      const inner = cosmos.querySelector('.ra-orbit-inner');
+      if (!outer || !inner) return false;
+      const outerNotes = Array.from(outer.querySelectorAll('.ra-orbit-note'));
+      const innerNotes = Array.from(inner.querySelectorAll('.ra-orbit-note'));
+
+      let activity = 0, target = 0, rotO = 0, rotI = 0;
+      let last = performance.now();
+      let reduced = false;
+      try {
+        const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+        reduced = !!mq.matches;
+        mq.addEventListener && mq.addEventListener('change', e => { reduced = !!e.matches; });
+      } catch (_) {}
+
+      function onMove(e) {
+        const r = cosmos.getBoundingClientRect();
+        if (!r.width || !r.height) return;
+        const cx = r.left + r.width / 2;
+        const cy = r.top  + r.height / 2;
+        const d  = Math.hypot(e.clientX - cx, e.clientY - cy);
+        const inR  = r.width * 0.30;   // fully active inside this radius
+        const outR = r.width * 0.95;   // fully idle past this radius
+        let t = d <= inR ? 1 : d >= outR ? 0 : 1 - (d - inR) / (outR - inR);
+        // ease-out cubic on the linear ramp so transitions feel softer
+        t = t <= 0 ? 0 : t >= 1 ? 1 : 1 - Math.pow(1 - t, 3);
+        target = t;
+      }
+      function onLeave(e) {
+        if (!e.relatedTarget && !e.toElement) target = 0;
+      }
+      window.addEventListener('mousemove', onMove, { passive: true });
+      window.addEventListener('mouseout', onLeave, true);
+      window.addEventListener('blur', () => { target = 0; });
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) target = 0;
+      });
+
+      function applyTransform(layer, rot, notes) {
+        layer.style.transform = `translate(-50%, -50%) rotate(${rot.toFixed(3)}deg)`;
+        for (const g of notes) {
+          const x = g.dataset.x, y = g.dataset.y, s = g.dataset.scale || '1';
+          g.setAttribute('transform', `translate(${x},${y}) rotate(${(-rot).toFixed(3)}) scale(${s})`);
+        }
+      }
+      function tick(now) {
+        const dt = Math.min(0.05, (now - last) / 1000);
+        last = now;
+        // Smoothly ease activity toward target
+        activity += (target - activity) * Math.min(1, dt * 4.5);
+        const eff = reduced ? activity * 0.15 : activity;
+        // Outer: slow clockwise   (baseline 0.4 → up to 7 deg/s at full activity)
+        // Inner: faster counter-clockwise (baseline -0.6 → up to -14 deg/s) — parallax
+        const speedO =  0.4 + eff * 6.6;
+        const speedI = -(0.6 + eff * 13.4);
+        rotO = (rotO + speedO * dt) % 360;
+        rotI = (rotI + speedI * dt) % 360;
+        applyTransform(outer, rotO, outerNotes);
+        applyTransform(inner, rotI, innerNotes);
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+      return true;
+    }
+    if (!attach()) {
+      const obs = new MutationObserver(() => { if (attach()) obs.disconnect(); });
+      obs.observe(document.body, { childList: true, subtree: true });
+    }
+  })();
+
   console.log('[RespondAI] keyboard ready');
 }"""
 
@@ -770,13 +848,16 @@ def render_piano_html(base_octave: int = 4) -> str:
 
     for bi, midi in enumerate(black_midis):
         left = (bi + 1) * WW - BW // 2 - 1
+        name = NOTE_NAMES[midi % 12] + str(midi // 12 - 1)
         kb_label = MIDI_KEY_LABEL.get(midi, "")
         blacks.append(
             f'<div data-midi="{midi}"'
             f' class="ra-key ra-key-black"'
             f' style="position:absolute;left:{left}px;top:0;width:{BW}px;height:{BH}px;'
             f'border-radius:0 0 3px 3px;cursor:pointer;z-index:2;'
-            f'display:flex;align-items:flex-end;justify-content:center;padding-bottom:3px;">'
+            f'display:flex;flex-direction:column;align-items:center;'
+            f'justify-content:flex-end;padding-bottom:3px;box-sizing:border-box;">'
+            f'<span class="ra-key-label ra-key-label-black">{name}</span>'
             + (f'<span class="ra-key-shortcut ra-key-shortcut-black">{kb_label}</span>' if kb_label else '')
             + f'</div>'
         )
@@ -941,11 +1022,6 @@ def s5_html(state: dict) -> str:
   {bonus_detail}
   <div class="s5-rounds">{round_grades_html}</div>
   <div class="s5-halfsphere"></div>
-  <div class="s5-footer">
-    <span>TERMS</span><span>·</span>
-    <span>COPYRIGHT &copy; RESPONDAI 2026</span><span>·</span>
-    <span>PRIVACY</span>
-  </div>
 </div>
 """
 
@@ -1217,6 +1293,38 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
   50%      { transform: translateY(-6px); }
 }
 
+/* Hero cosmos — two SVG layers (outer slow CW + inner faster CCW) orbiting the planet.
+   Rotation is driven by JS (mouse-distance based activity factor) for smooth parallax. */
+.ra-hero-cosmos {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: min(380px, 60vh);
+  aspect-ratio: 1;
+  margin: 12px auto 0;
+  cursor: default;
+}
+.ra-hero-cosmos .ra-hero-orb {
+  position: relative;
+  margin: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  z-index: 1;
+}
+.ra-orbit-outer,
+.ra-orbit-inner {
+  position: absolute;
+  top: 50%; left: 50%;
+  pointer-events: none;
+  transform-origin: 50% 50%;
+  transform: translate(-50%, -50%);
+  will-change: transform;
+}
+.ra-orbit-outer { width: 122%;  height: 122%; z-index: 2; }
+.ra-orbit-inner { width: 96%;   height: 96%;  z-index: 3; }
+.ra-orbit-note  { transition: opacity 0.25s ease; }
+
 /* S1 start buttons → mini-player pill style */
 .s1-actions {
   justify-content: center !important;
@@ -1395,6 +1503,11 @@ button.pill-cta.pill-cta-primary:hover {
   color: rgba(220,220,220,0.7);
   font-size: 8px;
 }
+.ra-key-label-black {
+  color: rgba(220,220,220,0.55) !important;
+  font-size: 7px !important;
+  margin-bottom: 1px;
+}
 
 /* Round done 메시지 */
 .ra-round-done {
@@ -1528,41 +1641,39 @@ button.pill-cta.pill-cta-primary:hover {
 }
 .s5-of { color: #6B6B6B; }
 .s5-rounds {
-  margin-top: 18px;
-  font-size: 11px; font-weight: 400;
-  letter-spacing: 1.5px; text-transform: uppercase;
-  color: var(--dark-sub);
+  position: absolute !important;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 2 !important;
+  font-size: 22px; font-weight: 500;
+  letter-spacing: 2.5px; text-transform: uppercase;
+  color: #DDDDDD;
+  white-space: nowrap;
+  text-shadow: 0 2px 14px rgba(14,14,14,0.7);
+  text-align: center;
 }
 .s5-halfsphere {
   position: absolute;
   left: 50%;
-  bottom: -64%;
+  bottom: -55%;
   transform: translateX(-50%);
-  width: min(1100px, 180%);
-  height: min(1100px, 180%);
+  width: min(720px, 100%);
+  height: min(720px, 100%);
   border-radius: 50%;
-  background: radial-gradient(ellipse at 50% 25%,
+  background: linear-gradient(to bottom,
     #F4F1FB 0%,
-    #DCD7F0 12%,
-    #C8C5E8 24%,
-    #B5E0F0 40%,
-    #7B9FD4 58%,
-    #1A7A8A 76%,
-    rgba(13,92,106,0.0) 92%);
+    #DCD7F0 4%,
+    #C8C5E8 7%,
+    #B5E0F0 11%,
+    #7B9FD4 14%,
+    rgba(26,122,138,0.55) 17%,
+    rgba(13,92,106,0.0) 22%);
   filter: blur(0.3px);
   pointer-events: none;
   z-index: 0;
 }
 .s5-stage > * { position: relative; z-index: 1; }
-.s5-footer {
-  position: relative;
-  margin-top: 22px;
-  display: flex; justify-content: center; gap: 14px;
-  font-size: 9px; letter-spacing: 2px;
-  color: #767676;
-  z-index: 2;
-}
-.s5-footer span { white-space: nowrap; }
 .s5-actions {
   position: relative !important;
   z-index: 3 !important;
@@ -1570,14 +1681,12 @@ button.pill-cta.pill-cta-primary:hover {
   justify-content: center !important;
   background: transparent !important;
 }
-.s5-actions .pill-cta {
-  background: rgba(255,255,255,0.08) !important;
-  border: 1px solid rgba(255,255,255,0.15) !important;
-  color: #F0F0F0 !important;
-}
-.s5-actions .pill-cta:hover {
-  background: rgba(255,255,255,0.14) !important;
-  opacity: 1 !important;
+.s5-actions .game-pill {
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0 !important;
+  max-width: 240px !important;
+  padding: 10px 26px 10px 20px !important;
 }
 .panel-s5 .ra-final-bonus {
   position: relative; z-index: 2;
@@ -1861,7 +1970,98 @@ with gr.Blocks(title="RespondAI") as app:
 <div class="ra-title-wrap">
   <div class="ra-hero-head">A call &amp; response with AI</div>
   <div class="ra-hero-sub">The only piano session built for<br/>spontaneous improvisation between you and a model.</div>
-  <div class="ra-hero-orb"></div>
+  <div class="ra-hero-cosmos">
+    <svg class="ra-orbit-outer" viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <defs>
+        <linearGradient id="orbitGradA" x1="0%" y1="20%" x2="100%" y2="80%">
+          <stop offset="0%" stop-color="#7E6FBE" stop-opacity="0.95"/>
+          <stop offset="55%" stop-color="#5A6FA6" stop-opacity="0.85"/>
+          <stop offset="100%" stop-color="#2C6E80" stop-opacity="0.85"/>
+        </linearGradient>
+        <linearGradient id="orbitGradB" x1="100%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#6E5FA8" stop-opacity="0.65"/>
+          <stop offset="100%" stop-color="#3A6E80" stop-opacity="0.55"/>
+        </linearGradient>
+        <linearGradient id="orbitGradC" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#5A5288" stop-opacity="0.55"/>
+          <stop offset="100%" stop-color="#2C5E72" stop-opacity="0.4"/>
+        </linearGradient>
+
+        <!-- Reusable note shapes (head centered at 0,0; stems up/right) -->
+        <symbol id="note-quarter" overflow="visible">
+          <ellipse cx="0" cy="0" rx="7" ry="5" transform="rotate(-22)"/>
+          <rect x="6" y="-30" width="1.8" height="30"/>
+        </symbol>
+        <symbol id="note-eighth" overflow="visible">
+          <ellipse cx="0" cy="0" rx="6.6" ry="4.8" transform="rotate(-22)"/>
+          <rect x="5.7" y="-30" width="1.7" height="30"/>
+          <path d="M 7.4 -30 C 18 -24 20 -15 13.5 -8 C 16 -16 11.5 -22 7.4 -24 Z"/>
+        </symbol>
+        <symbol id="note-beamed" overflow="visible">
+          <ellipse cx="-9" cy="2"  rx="6" ry="4.5" transform="rotate(-18)"/>
+          <ellipse cx="9"  cy="-1" rx="6" ry="4.5" transform="rotate(-18)"/>
+          <rect x="-3.8" y="-26" width="1.7" height="28"/>
+          <rect x="14.2" y="-29" width="1.7" height="28"/>
+          <path d="M -3.8 -26 L 15.9 -29 L 15.9 -23 L -3.8 -20 Z"/>
+        </symbol>
+        <symbol id="note-sixteenth" overflow="visible">
+          <ellipse cx="0" cy="0" rx="6.6" ry="4.8" transform="rotate(-22)"/>
+          <rect x="5.7" y="-32" width="1.7" height="32"/>
+          <path d="M 7.4 -32 C 18 -26 20 -17 13.5 -10 C 16 -18 11.5 -24 7.4 -26 Z"/>
+          <path d="M 7.4 -22 C 18 -16 20 -7  13.5 0   C 16 -8  11.5 -14 7.4 -16 Z"/>
+        </symbol>
+      </defs>
+
+      <!-- Outer curves -->
+      <path d="M 6 318 C 92 232, 188 392, 296 320 S 470 234, 596 308"
+            stroke="url(#orbitGradA)" stroke-width="2.6" fill="none" stroke-linecap="round"/>
+      <path d="M 70 168 Q 200 96, 320 168 T 552 196"
+            stroke="url(#orbitGradB)" stroke-width="1.8" fill="none" stroke-linecap="round" opacity="0.75"/>
+
+      <!-- Outer notes — bigger, further from orb -->
+      <g class="ra-orbit-note" data-x="38"  data-y="318" data-scale="1.15" fill="#2E3147" transform="translate(38,318) scale(1.15)">
+        <use href="#note-eighth"/>
+      </g>
+      <g class="ra-orbit-note" data-x="478" data-y="200" data-scale="1.05" fill="#3F4F7E" transform="translate(478,200) scale(1.05)">
+        <use href="#note-beamed"/>
+      </g>
+      <g class="ra-orbit-note" data-x="554" data-y="298" data-scale="1.00" fill="#2E5E72" transform="translate(554,298) scale(1)">
+        <use href="#note-sixteenth"/>
+      </g>
+      <g class="ra-orbit-note" data-x="128" data-y="470" data-scale="0.90" fill="#4A4F7A" transform="translate(128,470) scale(0.9)">
+        <use href="#note-quarter"/>
+      </g>
+      <g class="ra-orbit-note" data-x="116" data-y="150" data-scale="0.78" fill="#5E5288" transform="translate(116,150) scale(0.78)">
+        <use href="#note-eighth"/>
+      </g>
+    </svg>
+
+    <svg class="ra-orbit-inner" viewBox="0 0 600 600" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <!-- Inner curves — smaller accent loops + lower wave -->
+      <path d="M 92 270 q 30 -34 60 -16 q 30 18 16 50 q -16 32 -52 14"
+            stroke="url(#orbitGradA)" stroke-width="1.6" fill="none" stroke-linecap="round" opacity="0.7"/>
+      <path d="M 504 248 q 32 -10 40 18 q 8 28 -22 38 q -32 8 -38 -22"
+            stroke="url(#orbitGradB)" stroke-width="1.6" fill="none" stroke-linecap="round" opacity="0.7"/>
+      <path d="M 60 462 Q 220 526, 384 460 T 588 432"
+            stroke="url(#orbitGradC)" stroke-width="1.4" fill="none" stroke-linecap="round" opacity="0.55"/>
+
+      <!-- Inner notes — smaller, closer to orb -->
+      <g class="ra-orbit-note" data-x="296" data-y="118" data-scale="0.72" fill="#524678" transform="translate(296,118) scale(0.72)">
+        <use href="#note-eighth"/>
+      </g>
+      <g class="ra-orbit-note" data-x="492" data-y="372" data-scale="0.70" fill="#3F4F7E" transform="translate(492,372) scale(0.7)">
+        <use href="#note-quarter"/>
+      </g>
+      <g class="ra-orbit-note" data-x="182" data-y="430" data-scale="0.68" fill="#2E5E72" transform="translate(182,430) scale(0.68)">
+        <use href="#note-beamed"/>
+      </g>
+      <g class="ra-orbit-note" data-x="420" data-y="498" data-scale="0.65" fill="#4A4F7A" transform="translate(420,498) scale(0.65)">
+        <use href="#note-sixteenth"/>
+      </g>
+    </svg>
+
+    <div class="ra-hero-orb"></div>
+  </div>
 </div>
 
 <!-- Modals (S1 only) -->
@@ -1964,7 +2164,7 @@ with gr.Blocks(title="RespondAI") as app:
                 with gr.Column(elem_classes=["piano-roll-host", "s5-roll-hidden"]):
                     s5_roll = gr.Plot(show_label=False)
             with gr.Row(elem_classes=["screen-actions", "s5-actions"]):
-                btn_restart = gr.Button("↻  Play again",
+                btn_restart = gr.Button("↻  Play again", scale=0,
                                         elem_classes=["game-pill", "game-pill-primary"])
 
     # 건반 브리지 (Blocks 맨 끝 + 화면 밖 배치)
