@@ -333,105 +333,139 @@ def build_round_audio(
 
 # ─── Piano roll rendering ────────────────────────────────────────────────────
 
+ROLL_DPI        = 200
+NOTE_USER_COLOR = "#2563EB"
+NOTE_AI_COLOR   = "#F0594B"
+
+
+def _gradient_image(h: int = 440, w: int = 1320) -> np.ndarray:
+    """Soft diagonal gradient — lavender (top-left) → sky → teal (bottom-right)."""
+    lav  = np.array([0.922, 0.906, 0.973])
+    sky  = np.array([0.639, 0.804, 0.882])
+    teal = np.array([0.145, 0.404, 0.475])
+    yy, xx = np.mgrid[0:h, 0:w]
+    d = (xx / (w - 1)) * 0.42 + (yy / (h - 1)) * 0.58
+
+    def _smooth(t):
+        t = np.clip(t, 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    lo_w = _smooth(d / 0.52)                 # lavender → sky
+    hi_w = _smooth((d - 0.52) / 0.48)        # sky → teal
+    img = np.empty((h, w, 3), dtype=np.float32)
+    for k in range(3):
+        lo = lav[k] + (sky[k] - lav[k]) * lo_w
+        hi = sky[k] + (teal[k] - sky[k]) * hi_w
+        img[..., k] = np.where(d < 0.52, lo, hi)
+    return img
+
+
+_GRADIENT_IMG = _gradient_image()
+
+
+def _draw_roll_notes(ax, notes, x_offset, color, alpha=0.95, linewidth=0.9):
+    for n in notes:
+        width = max(n.end - n.start, 1)
+        rect = mpatches.FancyBboxPatch(
+            (x_offset + n.start, n.pitch - 0.42), width, 0.84,
+            boxstyle="round,pad=0.1",
+            facecolor=color, edgecolor="white",
+            linewidth=linewidth, alpha=alpha,
+            transform=ax.transData, zorder=4,
+        )
+        ax.add_patch(rect)
+
+
 def render_piano_roll(state: dict) -> plt.Figure:
     plt.close("all")
-    fig, ax = plt.subplots(figsize=(8.5, 1.65))
-    fig.patch.set_facecolor("#1a1a2e")
-    ax.set_facecolor("#16213e")
+    fig, ax = plt.subplots(figsize=(9.8, 2.95), dpi=ROLL_DPI)
+    fig.patch.set_alpha(0.0)
 
     pitch_lo, pitch_hi = 40, 90
+    x0, x1 = 0, MAX_EXCHANGES * EXCHANGE_STEPS
 
-    # Draw exchange separator lines
-    for ex in range(MAX_EXCHANGES + 1):
-        x = ex * EXCHANGE_STEPS
-        ax.axvline(x, color="#444466", linewidth=0.8, linestyle="--")
+    ax.imshow(_GRADIENT_IMG, extent=[x0, x1, pitch_lo, pitch_hi],
+              aspect="auto", origin="upper", zorder=0,
+              interpolation="bilinear")
 
-    # Exchange label backgrounds
+    # Exchange separators
+    for ex in range(1, MAX_EXCHANGES):
+        ax.axvline(ex * EXCHANGE_STEPS, color="white", linewidth=1.1,
+                   linestyle=(0, (4, 4)), alpha=0.5, zorder=2)
+
+    # Exchange labels
     for ex in range(MAX_EXCHANGES):
         x = ex * EXCHANGE_STEPS
-        ax.text(x + EXCHANGE_STEPS / 2, pitch_hi - 1.5,
+        ax.text(x + EXCHANGE_STEPS / 2, pitch_hi - 2.4,
                 f"EX {ex+1}", ha="center", va="top",
-                color="#888899", fontsize=7)
-
-    def draw_notes(notes, exchange_idx, color, alpha=0.85):
-        offset = exchange_idx * EXCHANGE_STEPS
-        for n in notes:
-            width = max(n.end - n.start, 1)
-            rect = mpatches.FancyBboxPatch(
-                (offset + n.start, n.pitch - 0.4), width, 0.8,
-                boxstyle="round,pad=0.1",
-                facecolor=color, edgecolor="white",
-                linewidth=0.5, alpha=alpha,
-                transform=ax.transData,
-            )
-            ax.add_patch(rect)
+                color="#3A3A55", fontsize=9, fontweight="bold",
+                alpha=0.7, zorder=3)
 
     for i, entry in enumerate(state["exchange_log"]):
-        draw_notes(entry["user_notes"], i, "#4A9EF5")
-        draw_notes(entry["ai_notes"],   i, "#F55A4A")
+        _draw_roll_notes(ax, entry["user_notes"], i * EXCHANGE_STEPS, NOTE_USER_COLOR)
+        _draw_roll_notes(ax, entry["ai_notes"],   i * EXCHANGE_STEPS, NOTE_AI_COLOR)
 
     # Current (unconfirmed) notes in current exchange slot
     cur_ex_idx = state["exchange"] - 1
-    draw_notes(state["current_notes"], cur_ex_idx, "#4A9EF5", alpha=0.45)
+    _draw_roll_notes(ax, state["current_notes"], cur_ex_idx * EXCHANGE_STEPS,
+                     NOTE_USER_COLOR, alpha=0.5)
 
-    ax.set_xlim(0, MAX_EXCHANGES * EXCHANGE_STEPS)
+    ax.set_xlim(x0, x1)
     ax.set_ylim(pitch_lo, pitch_hi)
-    ax.set_xlabel("Step", color="#aaaacc", fontsize=8)
-    ax.set_ylabel("Pitch", color="#aaaacc", fontsize=8)
-    ax.tick_params(colors="#aaaacc", labelsize=7)
+    ax.set_xticks([])
+    ax.set_yticks([])
     for spine in ax.spines.values():
-        spine.set_edgecolor("#333355")
+        spine.set_visible(False)
 
-    # Legend
-    user_patch = mpatches.Patch(color="#4A9EF5", label="You")
-    ai_patch   = mpatches.Patch(color="#F55A4A", label="AI")
-    ax.legend(handles=[user_patch, ai_patch], loc="lower right",
-              facecolor="#1a1a2e", edgecolor="#555577",
-              labelcolor="white", fontsize=8)
+    user_patch = mpatches.Patch(facecolor=NOTE_USER_COLOR, edgecolor="white", label="You")
+    ai_patch   = mpatches.Patch(facecolor=NOTE_AI_COLOR, edgecolor="white", label="AI")
+    leg = ax.legend(handles=[user_patch, ai_patch], loc="lower right",
+                    facecolor="white", edgecolor="none",
+                    labelcolor="#2A2A40", fontsize=8.5,
+                    framealpha=0.82, borderpad=0.6, handlelength=1.1)
+    leg.set_zorder(6)
 
-    fig.tight_layout(pad=0.5)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.97, bottom=0.03)
     return fig
 
 
 def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
     """Piano roll showing all rounds (for S4/S5)."""
     plt.close("all")
-    fig, ax = plt.subplots(figsize=(8.5, 1.75))
-    fig.patch.set_facecolor("#1a1a2e")
-    ax.set_facecolor("#16213e")
+    fig, ax = plt.subplots(figsize=(9.8, 2.6), dpi=ROLL_DPI)
+    fig.patch.set_alpha(0.0)
 
     pitch_lo, pitch_hi = 40, 90
     round_width = MAX_EXCHANGES * EXCHANGE_STEPS + 16
+    total_width = max(len(round_results) * round_width, 1)
+
+    ax.imshow(_GRADIENT_IMG, extent=[0, total_width, pitch_lo, pitch_hi],
+              aspect="auto", origin="upper", zorder=0,
+              interpolation="bilinear")
 
     for r_idx, rr in enumerate(round_results):
         r_offset = r_idx * round_width
-        ax.axvline(r_offset, color="#666688", linewidth=1.2)
-        ax.text(r_offset + round_width / 2, pitch_hi - 1.5,
-                f"R{rr['round_num']}", ha="center", color="#aaaacc", fontsize=8)
+        if r_idx > 0:
+            ax.axvline(r_offset, color="white", linewidth=1.3,
+                       alpha=0.6, zorder=2)
+        ax.text(r_offset + round_width / 2, pitch_hi - 2.4,
+                f"R{rr['round_num']}", ha="center", va="top",
+                color="#3A3A55", fontsize=9, fontweight="bold",
+                alpha=0.7, zorder=3)
         for ex_idx, entry in enumerate(rr["exchange_log"]):
             ex_offset = r_offset + ex_idx * EXCHANGE_STEPS
-            for n in entry["user_notes"]:
-                rect = mpatches.FancyBboxPatch(
-                    (ex_offset + n.start, n.pitch - 0.4), max(n.end - n.start, 1), 0.8,
-                    boxstyle="round,pad=0.1", facecolor="#4A9EF5",
-                    edgecolor="white", linewidth=0.4, alpha=0.85,
-                )
-                ax.add_patch(rect)
-            for n in entry["ai_notes"]:
-                rect = mpatches.FancyBboxPatch(
-                    (ex_offset + n.start, n.pitch - 0.4), max(n.end - n.start, 1), 0.8,
-                    boxstyle="round,pad=0.1", facecolor="#F55A4A",
-                    edgecolor="white", linewidth=0.4, alpha=0.85,
-                )
-                ax.add_patch(rect)
+            _draw_roll_notes(ax, entry["user_notes"], ex_offset,
+                             NOTE_USER_COLOR, linewidth=0.6)
+            _draw_roll_notes(ax, entry["ai_notes"], ex_offset,
+                             NOTE_AI_COLOR, linewidth=0.6)
 
-    total_width = len(round_results) * round_width
-    ax.set_xlim(0, max(total_width, 1))
+    ax.set_xlim(0, total_width)
     ax.set_ylim(pitch_lo, pitch_hi)
-    ax.tick_params(colors="#aaaacc", labelsize=7)
+    ax.set_xticks([])
+    ax.set_yticks([])
     for spine in ax.spines.values():
-        spine.set_edgecolor("#333355")
-    fig.tight_layout(pad=0.5)
+        spine.set_visible(False)
+    fig.subplots_adjust(left=0.012, right=0.988, top=0.97, bottom=0.03)
     return fig
 
 
@@ -1220,19 +1254,28 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
   min-height: 0 !important;
 }
 .s3-main .viz-side { display: none !important; }
+.s3-roll-row {
+  justify-content: center !important;
+  align-items: center !important;
+}
 .s3-main .piano-roll-host {
-  flex: 0 0 150px !important;
+  flex: 1 1 auto !important;
+  width: 100% !important;
+  max-width: 820px !important;
+  margin: 0 auto !important;
   min-width: 0 !important;
-  min-height: 150px !important;
-  max-height: 150px !important;
-  height: 150px !important;
+  min-height: 222px !important;
+  max-height: 222px !important;
+  height: 222px !important;
   overflow: hidden !important;
 }
 .s3-main .piano-roll-host .plot-container,
 .s3-main .piano-roll-host canvas {
-  height: 150px !important;
-  min-height: 150px !important;
-  max-height: 150px !important;
+  height: 222px !important;
+  min-height: 222px !important;
+  max-height: 222px !important;
+  width: 100% !important;
+  object-fit: contain !important;
 }
 .panel-s3 .ra-piano-wrap {
   flex: 0 0 auto !important;
@@ -1256,9 +1299,15 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
   transition: none !important;
   animation: none !important;
 }
+.panel-s4 .piano-roll-host, .panel-s5 .piano-roll-host {
+  width: 100% !important;
+  max-width: 820px !important;
+  margin: 0 auto !important;
+}
 .panel-s4 .plot-container, .panel-s5 .plot-container,
 .panel-s4 .piano-roll-host canvas, .panel-s5 .piano-roll-host canvas {
-  max-height: 140px !important;
+  max-height: 190px !important;
+  width: 100% !important;
 }
 
 /* S1 nav (amra-style) */
@@ -2201,7 +2250,7 @@ with gr.Blocks(title="RespondAI") as app:
         with gr.Column(visible=True, elem_classes=["game-panel", "panel-s3", "hide"]) as screen_s3:
             with gr.Column(elem_classes=["screen-body", "s3-main"]):
                 s3_hud_html  = gr.HTML()
-                with gr.Row():
+                with gr.Row(elem_classes=["s3-roll-row"]):
                     s3_viz_player = gr.HTML(render_energy_svg([], "player"), elem_classes=["viz-side"])
                     with gr.Column(elem_classes=["piano-roll-host"]):
                         s3_roll = gr.Plot(show_label=False)
