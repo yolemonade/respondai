@@ -1520,16 +1520,32 @@ button.pill-cta.pill-cta-primary:hover {
   100% { transform: translateY(0); opacity: 1; }
 }
 
-/* S3 버튼 왼쪽 그룹 */
-.s3-btn-left {
+/* S3 하단 액션 바 — Undo/Preview(좌) · Confirm 등(우), 겹침 방지 */
+.panel-s3 .s3-actions-bar {
   display: flex !important;
-  flex-direction: column !important;
-  gap: 4px !important;
-  flex: 0 0 auto !important;
-  min-width: 86px !important;
-  max-width: 100px !important;
+  flex-direction: row !important;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 10px 14px !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
 }
-.s3-btn-left button { flex: 1 !important; min-height: 32px !important; font-size: 12px !important; }
+.s3-actions-bar {
+  justify-content: center !important;
+  align-items: center !important;
+  gap: 10px !important;
+  flex-wrap: nowrap !important;
+}
+.s3-actions-bar > * {
+  flex-shrink: 1 !important;
+  min-width: 0 !important;
+}
+.s3-side-btn button {
+  width: 100% !important;
+  min-height: 40px !important;
+  font-size: 12px !important;
+}
 
 /* 건반 단축키 레이블 */
 .ra-key-shortcut {
@@ -1843,10 +1859,23 @@ button.pill-cta.pill-cta-primary:hover {
 .game-pill-primary:hover:not(:disabled) {
   box-shadow: 0 8px 26px rgba(0,0,0,0.18) !important;
 }
-/* Confirm button — trim sideways a touch so it doesn't feel oversized */
+/* Confirm — 우측 그룹, 약 2배 크기 */
 #btn-confirm {
-  max-width: 92% !important;
-  margin: 0 auto !important;
+  flex: 0 0 auto !important;
+  min-width: 0 !important;
+  width: auto !important;
+}
+#btn-confirm,
+#btn-confirm button {
+  padding: 14px 32px 14px 24px !important;
+  font-size: 16px !important;
+  font-weight: 600 !important;
+  min-height: 52px !important;
+  gap: 12px !important;
+  width: auto !important;
+  max-width: max-content !important;
+  margin: 0 !important;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.14) !important;
 }
 
 /* Modals (S1 nav popups) */
@@ -2180,18 +2209,17 @@ with gr.Blocks(title="RespondAI") as app:
                 s3_piano     = gr.HTML(render_piano_html(4))
                 s3_note_list = gr.HTML(note_list_html([]), elem_classes=["ra-note-list-host"])
                 s3_audio     = gr.HTML("", elem_id="s3-exchange-audio")
-            with gr.Row(elem_classes=["screen-actions"]):
-                with gr.Column(scale=1, min_width=90, elem_classes=["s3-btn-left"]):
-                    btn_cancel  = gr.Button("↺  Undo  (Backspace)", size="sm",
-                                            elem_classes=["game-pill", "game-pill-sm"])
-                    btn_preview = gr.Button("♪\ufe0e  Preview", size="sm",
-                                            elem_classes=["game-pill", "game-pill-sm"])
+            with gr.Row(elem_classes=["screen-actions", "s3-actions-bar"]):
+                btn_cancel      = gr.Button("↺  Undo", scale=1,
+                                            elem_classes=["game-pill", "game-pill-sm", "s3-side-btn"])
                 btn_confirm     = gr.Button("★\ufe0e  Confirm  (Enter)", scale=3,
                                             elem_id="btn-confirm",
                                             elem_classes=["game-pill", "game-pill-primary"])
-                btn_next_inline = gr.Button("☁\ufe0e  See result", scale=2,
-                                            interactive=False, elem_id="btn-next-inline",
-                                            elem_classes=["game-pill"])
+                btn_preview     = gr.Button("♪\ufe0e  Preview", scale=1,
+                                            elem_classes=["game-pill", "game-pill-sm", "s3-side-btn"])
+                btn_next_inline    = gr.Button("☁\ufe0e  See result", scale=2,
+                                               interactive=False, elem_id="btn-next-inline",
+                                               elem_classes=["game-pill"])
                 btn_restart_inline = gr.Button("↻  Play again", scale=2,
                                                interactive=False, elem_id="btn-restart-inline",
                                                elem_classes=["game-pill"])
