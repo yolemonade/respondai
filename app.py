@@ -1207,16 +1207,57 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
   border: none !important;
 }
 
-/* S3: 피아노롤만 넓게, 사이드 viz 숨김 */
+/* S3: 고정 높이 레이아웃 — 건반 입력 시 스크롤·검정 깜빡임 방지 */
+.panel-s3.game-panel {
+  overflow: hidden !important;
+}
+.panel-s3 .screen-body.s3-main {
+  overflow: hidden !important;
+  min-height: 0 !important;
+}
+.s3-main {
+  overflow: hidden !important;
+  min-height: 0 !important;
+}
 .s3-main .viz-side { display: none !important; }
-.s3-main .piano-roll-host { flex: 1 1 auto !important; min-width: 0 !important; }
-.s3-main .piano-roll-host .plot-container,
-.s3-main .piano-roll-host canvas {
+.s3-main .piano-roll-host {
+  flex: 0 0 150px !important;
+  min-width: 0 !important;
+  min-height: 150px !important;
   max-height: 150px !important;
   height: 150px !important;
+  overflow: hidden !important;
 }
-.game-panel .plot-container,
-.game-panel .piano-roll-host canvas {
+.s3-main .piano-roll-host .plot-container,
+.s3-main .piano-roll-host canvas {
+  height: 150px !important;
+  min-height: 150px !important;
+  max-height: 150px !important;
+}
+.panel-s3 .ra-piano-wrap {
+  flex: 0 0 auto !important;
+}
+.panel-s3 .ra-note-list-host {
+  flex: 0 0 48px !important;
+  min-height: 48px !important;
+  max-height: 48px !important;
+  overflow: hidden !important;
+}
+.panel-s3 .ra-note-list-host .ra-note-list,
+.panel-s3 .ra-note-list-host .ra-note-empty {
+  min-height: 40px !important;
+  max-height: 40px !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+}
+/* 건반 입력마다 Gradio 블록 재렌더 시 깜빡임/검정 화면 방지 */
+.panel-s3 .block, .panel-s3 .form,
+.panel-s3 .gr-html, .panel-s3 .html-container {
+  transition: none !important;
+  animation: none !important;
+}
+.panel-s4 .plot-container, .panel-s5 .plot-container,
+.panel-s4 .piano-roll-host canvas, .panel-s5 .piano-roll-host canvas {
   max-height: 140px !important;
 }
 
@@ -2137,7 +2178,7 @@ with gr.Blocks(title="RespondAI") as app:
                         s3_roll = gr.Plot(show_label=False)
                     s3_viz_ai = gr.HTML(render_energy_svg([], "ai"), elem_classes=["viz-side"])
                 s3_piano     = gr.HTML(render_piano_html(4))
-                s3_note_list = gr.HTML(note_list_html([]))
+                s3_note_list = gr.HTML(note_list_html([]), elem_classes=["ra-note-list-host"])
                 s3_audio     = gr.HTML("", elem_id="s3-exchange-audio")
             with gr.Row(elem_classes=["screen-actions"]):
                 with gr.Column(scale=1, min_width=90, elem_classes=["s3-btn-left"]):
@@ -2255,39 +2296,41 @@ with gr.Blocks(title="RespondAI") as app:
     round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
 
     def on_note_event(midi: int, st: dict):
-        if st["phase"] != "user_input":
-            return st, render_piano_roll(st), note_list_html(st["current_notes"]), hud_html(st)
-
-        if midi == -1:
-            if st["current_notes"]:
-                st["current_notes"] = st["current_notes"][:-1]
-        elif 21 <= midi <= 108:
-            if len(st["current_notes"]) < MAX_NOTES:
-                i = len(st["current_notes"])
-                st["current_notes"] = st["current_notes"] + [
+        """건반 입력 — 피아노롤(Plot)·HUD는 갱신하지 않음 (매 키마다 재렌더 시 검정 화면)."""
+        notes = st["current_notes"]
+        if st["phase"] == "user_input":
+            if midi == -1:
+                if notes:
+                    st["current_notes"] = notes[:-1]
+            elif 21 <= midi <= 108 and len(notes) < MAX_NOTES:
+                i = len(notes)
+                st["current_notes"] = notes + [
                     Note(midi, i * DEFAULT_DURATION, (i + 1) * DEFAULT_DURATION)
                 ]
+        return st, note_list_html(st["current_notes"])
 
-        return st, render_piano_roll(st), note_list_html(st["current_notes"]), hud_html(st)
+    _note_outputs = [state, s3_note_list]
 
-    _note_outputs = [state, s3_roll, s3_note_list, s3_hud_html]
+    _note_click_kw = dict(show_progress="hidden")
 
     btn_undo.click(
         lambda st: on_note_event(-1, st), inputs=[state], outputs=_note_outputs,
+        **_note_click_kw,
     )
     for midi, btn in _note_btn_map:
         btn.click(
             lambda st, m=midi: on_note_event(m, st),
             inputs=[state], outputs=_note_outputs,
+            **_note_click_kw,
         )
 
     # Cancel last note
     def on_cancel(st):
         if st["phase"] == "user_input" and st["current_notes"]:
             st["current_notes"] = st["current_notes"][:-1]
-        return st, render_piano_roll(st), note_list_html(st["current_notes"]), hud_html(st)
+        return st, note_list_html(st["current_notes"])
 
-    btn_cancel.click(on_cancel, inputs=[state], outputs=_note_outputs)
+    btn_cancel.click(on_cancel, inputs=[state], outputs=_note_outputs, **_note_click_kw)
 
     def on_preview(st):
         yield gr.update(value="")
