@@ -1293,6 +1293,17 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
   overflow: hidden !important;
   margin: 0 !important;
 }
+/* AI 생성/재생 안내 메시지 — 48px 노트리스트 영역에 맞춰 컴팩트하게 */
+.panel-s3 .ra-note-list-host .ra-round-done {
+  padding: 7px 14px !important;
+  margin: 0 !important;
+  font-size: 12.5px !important;
+  max-height: 46px !important;
+  box-sizing: border-box !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
 /* 건반 입력마다 Gradio 블록 재렌더 시 깜빡임/검정 화면 방지 */
 .panel-s3 .block, .panel-s3 .form,
 .panel-s3 .gr-html, .panel-s3 .html-container {
