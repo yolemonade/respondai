@@ -1,7 +1,11 @@
 """RespondAI — Phase 2 Gradio app (real model)."""
 from __future__ import annotations
 
+import base64
+import io
 import random
+import time
+import wave as _wave
 from typing import List, Optional
 
 import matplotlib
@@ -177,7 +181,6 @@ def init_state() -> dict:
         "bpm": 90,
         "mode": "piano",
         "total_score": 0,
-        "pending_s4": False,
     }
 
 
@@ -285,12 +288,32 @@ def estimate_playback_ms(user_notes: List[Note], ai_notes: List[Note], bpm: int)
     return int(sec * 1000)
 
 
+def audio_to_html(audio_tuple) -> str:
+    """Convert (sample_rate, int16_ndarray) to an autoplay HTML audio element.
+
+    Uses a native <audio> element to bypass WaveSurfer's retained playback
+    position bug in gr.Audio — each call creates a fresh DOM element at t=0.
+    """
+    sample_rate, data = audio_tuple
+    buf = io.BytesIO()
+    with _wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(data.tobytes())
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return (
+        f'<audio autoplay src="data:audio/wav;base64,{b64}" '
+        f'style="display:none" id="s3-audio-el"></audio>'
+    )
+
+
 def build_round_audio(
     user_notes: List[Note],
     ai_notes: List[Note],
     bpm: int,
 ) -> tuple:
-    """Return (sample_rate, int16_mono) for Gradio gr.Audio."""
+    """Return (sample_rate, int16_mono) for audio synthesis."""
     gap = np.zeros(int(0.15 * SAMPLE_RATE), dtype=np.float32)
     user_wav = synth_notes(user_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="user")
     ai_wav = synth_notes(
@@ -486,8 +509,8 @@ def render_energy_svg(
 # ─── JS: elem_id nk-{midi} / btn-undo Gradio 버튼 클릭 ─────────────────────
 
 KEYBOARD_JS = """() => {
-  if (window.__respondAIKeyboardV === 5) return;
-  window.__respondAIKeyboardV = 5;
+  if (window.__respondAIKeyboardV === 12) return;
+  window.__respondAIKeyboardV = 12;
 
   /* 확장 건반: 흰 a s d f g h j k l / 검 w e r t y u i o */
   const WHITE_SEMI = { KeyA:0, KeyS:2, KeyD:4, KeyF:5, KeyG:7, KeyH:9, KeyJ:11, KeyK:12, KeyL:14 };
@@ -518,9 +541,15 @@ KEYBOARD_JS = """() => {
     return e.code || e.key;
   }
 
+  function readPhase() {
+    if (window._raPhase) return window._raPhase;
+    const hud = document.querySelector('.panel-s3:not(.hide) .ra-hud[data-phase]')
+      || document.querySelector('.ra-hud[data-phase]');
+    return hud ? (hud.dataset.phase || '') : '';
+  }
+
   function isInputLocked() {
-    const btn = gradioBtn('btn-confirm');
-    return !!(btn && btn.disabled);
+    return readPhase() === 'ai_response';
   }
 
   function isVisible(el) {
@@ -771,37 +800,29 @@ STOP_AUDIO_JS = """() => {
   });
 }"""
 
-# Gradio Audio blob URL이 비어 duration=NaN 인 경우가 있어 JS ended 대기는 멈춤 → 서버 sleep 사용
-PLAY_EXCHANGE_JS = """async () => {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  function findAudio() {
-    const roots = [document];
-    document.querySelectorAll('gradio-app, .gradio-container').forEach((h) => {
-      if (h.shadowRoot) roots.push(h.shadowRoot);
-    });
-    for (const root of roots) {
-      const host = root.getElementById('s3-exchange-audio')
-        || root.querySelector('#s3-exchange-audio');
-      if (host) {
-        const a = host.tagName === 'AUDIO' ? host : host.querySelector('audio');
-        if (a) return a;
-      }
-    }
-    return null;
-  }
-  for (let i = 0; i < 40; i++) {
-    const a = findAudio();
-    if (a && (a.currentSrc || a.src)) {
-      try { a.pause(); a.currentTime = 0; await a.play(); } catch (_) {}
-      return;
-    }
-    await sleep(50);
-  }
-}"""
-
 FOCUS_GAME_JS = """() => {
   const ae = document.activeElement;
   if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+}"""
+
+UNLOCK_INPUT_JS = """(phase) => {
+  if (phase) window._raPhase = String(phase).trim();
+}"""
+
+# 패널 표시 — Python gr.update(visible/elem_classes) 대신 DOM .hide 토글
+SHOW_SCREEN_JS = """(screenId) => {
+  const id = String(screenId || 'S1').trim().toUpperCase();
+  const target = 'panel-' + id.toLowerCase();
+  const roots = [document];
+  document.querySelectorAll('gradio-app, .gradio-container').forEach((h) => {
+    if (h.shadowRoot) roots.push(h.shadowRoot);
+  });
+  for (const root of roots) {
+    root.querySelectorAll('.game-stage .game-panel, .game-panel.panel-s1, .game-panel.panel-s2, .game-panel.panel-s3, .game-panel.panel-s4, .game-panel.panel-s5').forEach((el) => {
+      if (el.classList.contains(target)) el.classList.remove('hide');
+      else el.classList.add('hide');
+    });
+  }
 }"""
 
 
@@ -869,8 +890,9 @@ def hud_html(state: dict) -> str:
         badge = '<div class="ra-turn-badge ra-turn-result">● ROUND RESULT</div>'
     else:
         badge = '<div class="ra-turn-badge ra-turn-result">● SESSION END</div>'
+    ex_done = len(state.get("exchange_log", []))
     return f"""
-<div class="ra-hud">
+<div class="ra-hud" data-phase="{phase}" data-exchange-done="{ex_done}">
   <div class="ra-hud-group">
     <span class="ra-hud-round">R{state['round']}/{TOTAL_ROUNDS}</span>
     <span class="ra-hud-exchange">EX {state['exchange']}/{MAX_EXCHANGES}</span>
@@ -1903,19 +1925,36 @@ button.pill-cta.pill-cta-primary:hover {
 
 # ─── Gradio app ──────────────────────────────────────────────────────────────
 
-def _vis(v: bool):
-    return gr.update(visible=v)
-
-
 def _stop_audio():
     """AI 재생 종료 — 내 턴으로 돌아올 때 이전 오디오가 반복되지 않게."""
-    return gr.update(value=None, visible=False, autoplay=False)
+    return gr.update(value="")
 
 
 def _screens(*visible_ids):
-    """Return visibility updates for [s1,s2,s3,s4,s5] in order."""
-    ids = ["S1", "S2", "S3", "S4", "S5"]
-    return tuple(gr.update(visible=(sid in visible_ids)) for sid in ids)
+    """
+    Python visible 토글은 DOM unmount → 하얀 화면 유발.
+    패널 표시는 SHOW_SCREEN_JS(.hide)만 사용. visible_ids 는 state 기록용.
+    """
+    return tuple(gr.update() for _ in range(5))
+
+
+def _nav(st: dict, screen: str) -> str:
+    st["screen"] = screen
+    return screen
+
+
+def _phase(st: dict) -> str:
+    return st.get("phase", "user_input")
+
+
+def _result_panel_updates(st: dict):
+    """S4/S5 결과 HTML — 화면 전환 직전/직후 채움."""
+    sid = st.get("screen", "S3")
+    if sid == "S4":
+        return s4_html(st), gr.update(), gr.update()
+    if sid == "S5":
+        return gr.update(), s5_html(st), render_full_history_roll(st["round_results"])
+    return gr.update(), gr.update(), gr.update()
 
 
 with gr.Blocks(title="RespondAI") as app:
@@ -2081,7 +2120,7 @@ with gr.Blocks(title="RespondAI") as app:
                                               elem_id="btn-humming-start")
 
         # ── S2: Round start ──────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s2"]) as screen_s2:
+        with gr.Column(visible=True, elem_classes=["game-panel", "panel-s2", "hide"]) as screen_s2:
             with gr.Column(elem_classes=["screen-body"]):
                 s2_info = gr.HTML()
             with gr.Row(elem_classes=["screen-actions", "s2-actions"]):
@@ -2089,7 +2128,7 @@ with gr.Blocks(title="RespondAI") as app:
                                             elem_classes=["pill-cta", "pill-cta-primary"])
 
         # ── S3: Main game ────────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s3"]) as screen_s3:
+        with gr.Column(visible=True, elem_classes=["game-panel", "panel-s3", "hide"]) as screen_s3:
             with gr.Column(elem_classes=["screen-body", "s3-main"]):
                 s3_hud_html  = gr.HTML()
                 with gr.Row():
@@ -2099,7 +2138,7 @@ with gr.Blocks(title="RespondAI") as app:
                     s3_viz_ai = gr.HTML(render_energy_svg([], "ai"), elem_classes=["viz-side"])
                 s3_piano     = gr.HTML(render_piano_html(4))
                 s3_note_list = gr.HTML(note_list_html([]))
-                s3_audio     = gr.Audio(label="", autoplay=True, visible=False, elem_id="s3-exchange-audio")
+                s3_audio     = gr.HTML("", elem_id="s3-exchange-audio")
             with gr.Row(elem_classes=["screen-actions"]):
                 with gr.Column(scale=1, min_width=90, elem_classes=["s3-btn-left"]):
                     btn_cancel  = gr.Button("↺  Undo  (Backspace)", size="sm",
@@ -2117,7 +2156,7 @@ with gr.Blocks(title="RespondAI") as app:
                                                elem_classes=["game-pill"])
 
         # ── S4: Round result ─────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s4"]) as screen_s4:
+        with gr.Column(visible=True, elem_classes=["game-panel", "panel-s4", "hide"]) as screen_s4:
             with gr.Column(elem_classes=["screen-body"]):
                 s4_result_html = gr.HTML()
             with gr.Row(elem_classes=["screen-actions"]):
@@ -2125,7 +2164,7 @@ with gr.Blocks(title="RespondAI") as app:
                                            elem_classes=["game-pill", "game-pill-primary"])
 
         # ── S5: Final result ─────────────────────────────────────────────────
-        with gr.Column(visible=False, elem_classes=["game-panel", "panel-s5"]) as screen_s5:
+        with gr.Column(visible=True, elem_classes=["game-panel", "panel-s5", "hide"]) as screen_s5:
             with gr.Column(elem_classes=["screen-body", "s5-body"]):
                 s5_result_html = gr.HTML()
                 with gr.Column(elem_classes=["piano-roll-host", "s5-roll-hidden"]):
@@ -2133,6 +2172,10 @@ with gr.Blocks(title="RespondAI") as app:
             with gr.Row(elem_classes=["screen-actions", "s5-actions"]):
                 btn_restart = gr.Button("↻  Play again", scale=0,
                                         elem_classes=["game-pill", "game-pill-primary"])
+
+        screen_nav = gr.Textbox(value="S1", visible=False, elem_id="ra-screen-nav")
+        phase_nav  = gr.Textbox(value="user_input", visible=False, elem_id="ra-phase-nav")
+        exchange_nav = gr.Textbox(value="0", visible=False, elem_id="ra-exchange-nav")
 
     # 건반 브리지 (Blocks 맨 끝 + 화면 밖 배치)
     _note_names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
@@ -2167,28 +2210,23 @@ with gr.Blocks(title="RespondAI") as app:
         st["mode"] = "piano"
         st["key"]  = random.choice(KEYS)
         st["bpm"]  = random.choice(BPM_CHOICES)
-        return (
-            st,
-            _s2_info_html(st),
-            *_screens("S2"),
-        )
+        return st, _s2_info_html(st), _nav(st, "S2")
 
     btn_piano_start.click(
         on_piano_start, inputs=[state],
-        outputs=[state, s2_info, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    )
+        outputs=[state, s2_info, screen_nav],
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
-    # S2 → S3 (Gradio 6: 자식 갱신이 부모 visible을 덮어씀 → 2단계 체인)
-    def on_round_start_state(st):
+    # S2 → S3 — 상태·S3 UI·화면 전환을 한 번에 (분리 시 Gradio 6 하얀 화면)
+    def on_round_start(st):
         st["exchange"]      = 1
         st["phase"]         = "user_input"
+        st["screen"]        = "S3"
         st["current_notes"] = []
         st["ai_notes"]      = []
         st["exchange_log"]  = []
-        return st, *_screens("S3")
-
-    def on_round_start_ui(st):
         return (
+            st,
             hud_html(st),
             render_piano_roll(st),
             render_energy_svg([], "player"),
@@ -2201,24 +2239,24 @@ with gr.Blocks(title="RespondAI") as app:
             gr.update(interactive=False),
             gr.update(interactive=False),
             _stop_audio(),
-            *_screens("S3"),
+            _nav(st, "S3"),
+            _phase(st),
         )
 
     round_start_chain = btn_round_start.click(
-        on_round_start_state, inputs=[state],
-        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    ).then(
-        on_round_start_ui, inputs=[state],
-        outputs=[s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
-                 s3_piano,
-                 btn_confirm, btn_cancel, btn_preview, btn_next_inline, btn_restart_inline, s3_audio,
-                 screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+        on_round_start, inputs=[state],
+        outputs=[
+            state, s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
+            s3_piano, btn_confirm, btn_cancel, btn_preview, btn_next_inline,
+            btn_restart_inline, s3_audio, screen_nav, phase_nav,
+        ],
     )
+    round_start_chain.then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
     round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
 
     def on_note_event(midi: int, st: dict):
         if st["phase"] != "user_input":
-            return st, render_piano_roll(st), note_list_html(st["current_notes"])
+            return st, render_piano_roll(st), note_list_html(st["current_notes"]), hud_html(st)
 
         if midi == -1:
             if st["current_notes"]:
@@ -2230,42 +2268,51 @@ with gr.Blocks(title="RespondAI") as app:
                     Note(midi, i * DEFAULT_DURATION, (i + 1) * DEFAULT_DURATION)
                 ]
 
-        return st, render_piano_roll(st), note_list_html(st["current_notes"])
+        return st, render_piano_roll(st), note_list_html(st["current_notes"]), hud_html(st)
+
+    _note_outputs = [state, s3_roll, s3_note_list, s3_hud_html]
 
     btn_undo.click(
-        lambda st: on_note_event(-1, st), inputs=[state],
-        outputs=[state, s3_roll, s3_note_list],
+        lambda st: on_note_event(-1, st), inputs=[state], outputs=_note_outputs,
     )
     for midi, btn in _note_btn_map:
         btn.click(
             lambda st, m=midi: on_note_event(m, st),
-            inputs=[state],
-        outputs=[state, s3_roll, s3_note_list],
-    )
+            inputs=[state], outputs=_note_outputs,
+        )
 
     # Cancel last note
     def on_cancel(st):
         if st["phase"] == "user_input" and st["current_notes"]:
             st["current_notes"] = st["current_notes"][:-1]
-        return st, render_piano_roll(st), note_list_html(st["current_notes"])
+        return st, render_piano_roll(st), note_list_html(st["current_notes"]), hud_html(st)
 
-    btn_cancel.click(on_cancel, inputs=[state],
-                     outputs=[state, s3_roll, s3_note_list])
+    btn_cancel.click(on_cancel, inputs=[state], outputs=_note_outputs)
 
-    # Preview (play current notes) — 2-step update forces the <audio> element
-    # to reload its src; otherwise Gradio reuses the same temp file hash and the
-    # browser silently keeps the previous buffer.
     def on_preview(st):
-        yield gr.update(value=None, autoplay=False, visible=True)
+        yield gr.update(value="")
         audio = build_round_audio(st["current_notes"], [], st["bpm"])
-        yield gr.update(value=audio, autoplay=True, visible=True)
+        yield gr.update(value=audio_to_html(audio))
 
     btn_preview.click(on_preview, inputs=[state], outputs=[s3_audio])
 
     _confirm_outputs = [
         state, s3_roll, s3_note_list, s3_hud_html, s3_viz_player, s3_viz_ai, s3_piano,
         btn_confirm, btn_cancel, btn_preview, btn_next_inline, btn_restart_inline, s3_audio,
+        s4_result_html, s5_result_html, s5_roll, phase_nav, exchange_nav,
     ]
+    _CONFIRM_NOOP = (gr.update(),) * 15
+    _LOCKED_BTNS = (
+        gr.update(interactive=False),
+        gr.update(interactive=False),
+        gr.update(interactive=False),
+    )
+    _IDLE_BTNS = (
+        gr.update(interactive=True),
+        gr.update(interactive=True),
+        gr.update(interactive=True),
+    )
+    _confirm_tail = (gr.update(), gr.update(), gr.update())
 
     def _finalize_round(st: dict) -> None:
         exs = st["exchange_log"]
@@ -2288,33 +2335,39 @@ with gr.Blocks(title="RespondAI") as app:
         }]
         st["total_score"] += round_total
         st["phase"] = "round_result"
+        st["screen"] = "S4"
 
     def on_confirm(st):
-        """확정: AI 생성/재생 대기 + 교환/라운드/게임오버 UI 갱신."""
+        """AI 생성 → 재생 yield → 대기 → YOUR TURN (한 제너레이터에서 state 동기화)."""
         if st["phase"] != "user_input":
-            last = st["exchange_log"][-1] if st["exchange_log"] else None
-            last_attn = last.get("attn_scores") if last else None
-            show_next = (st.get("phase") == "round_result" and st.get("round", 1) < TOTAL_ROUNDS)
-            show_restart = (st.get("phase") == "game_over")
-            return (
-                st,
-                render_piano_roll(st), note_list_html([]), hud_html(st),
-                render_energy_svg([], "player"),
-                render_energy_svg(st["ai_notes"], "ai", last_attn),
-                gr.update(),
-                gr.update(interactive=(st["phase"] == "user_input")),
-                gr.update(interactive=(st["phase"] == "user_input")),
-                gr.update(interactive=(st["phase"] == "user_input")),
-                gr.update(interactive=show_next),
-                gr.update(interactive=show_restart),
-                gr.update(),
-            )
+            yield (st,) + _CONFIRM_NOOP + (_phase(st), str(len(st["exchange_log"])))
+            return
 
         user_notes = list(st["current_notes"])
         key_token = KEY_TO_TOKEN[st["key"]]
         exchange_num = len(st["exchange_log"]) + 1
         st["exchange"] = exchange_num
         st["phase"] = "ai_response"
+
+        thinking_msg = (
+            '<div class="ra-round-done">'
+            '<span class="ra-help-dot">●</span> AI is composing a response…'
+            '</div>'
+        )
+        yield (
+            st,
+            render_piano_roll(st), thinking_msg, hud_html(st),
+            render_energy_svg([], "player"),
+            render_energy_svg([], "ai"),
+            gr.update(),
+            *_LOCKED_BTNS,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(),
+            *_confirm_tail,
+            "ai_response",
+            str(len(st["exchange_log"])),
+        )
 
         max_bars, max_new_tokens = generation_limits(user_notes)
         result = generate(
@@ -2344,63 +2397,90 @@ with gr.Blocks(title="RespondAI") as app:
         st["current_notes"] = []
 
         audio = build_round_audio(user_notes, ai_notes, st["bpm"])
-        audio_up = gr.update(value=audio, visible=True, autoplay=True)
+        playback_ms = max(
+            estimate_playback_ms(user_notes, ai_notes, st["bpm"]),
+            audio_duration_ms(audio),
+        )
+        playing_msg = (
+            '<div class="ra-round-done">'
+            '<span class="ra-help-dot">●</span> Playing AI response…'
+            '</div>'
+        )
+        yield (
+            st,
+            render_piano_roll(st), playing_msg, hud_html(st),
+            render_energy_svg([], "player"),
+            render_energy_svg(st["ai_notes"], "ai", attn_scores),
+            gr.update(),
+            *_LOCKED_BTNS,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(value=audio_to_html(audio)),
+            *_confirm_tail,
+            "ai_response",
+            str(len(st["exchange_log"])),
+        )
+
+        # 재생이 끝난 뒤에만 UI 갱신 (별도 .then + stale state 방지). s3_audio 는 건드리지 않음.
+        time.sleep(min(playback_ms / 1000.0 + 1.0, 24.0))
 
         completed = len(st["exchange_log"])
         if completed < MAX_EXCHANGES:
             st["exchange"] = completed + 1
             st["phase"] = "user_input"
-            return (
+            st["screen"] = "S3"
+            yield (
                 st,
                 render_piano_roll(st), note_list_html([]), hud_html(st),
                 render_energy_svg([], "player"),
                 render_energy_svg(st["ai_notes"], "ai", attn_scores),
                 gr.update(value=render_piano_html(4)),
-                gr.update(interactive=True),
-                gr.update(interactive=True),
-                gr.update(interactive=True),
+                *_IDLE_BTNS,
                 gr.update(interactive=False),
                 gr.update(interactive=False),
-                audio_up,
+                gr.update(),
+                *_confirm_tail,
+                "user_input",
+                str(completed),
+            )
+        else:
+            _finalize_round(st)
+            s4, s5, roll = _result_panel_updates(st)
+            yield (
+                st,
+                render_piano_roll(st), note_list_html([]), hud_html(st),
+                render_energy_svg([], "player"),
+                render_energy_svg(st["ai_notes"], "ai", attn_scores),
+                gr.update(value=""),
+                *_LOCKED_BTNS,
+                gr.update(interactive=False),
+                gr.update(interactive=False),
+                gr.update(),
+                s4, s5, roll,
+                _phase(st),
+                str(completed),
             )
 
-        _finalize_round(st)
-        is_final = st["round"] >= TOTAL_ROUNDS
-        if is_final:
-            st["phase"] = "game_over"
-        done_msg = (
-            '<div class="ra-round-done">'
-            '<span class="ra-help-dot">●</span> AI response complete &nbsp;'
-            '<span class="ra-round-done-cta">Press “See result”</span>'
-            '</div>'
-        )
-        return (
-            st,
-            render_piano_roll(st), done_msg, hud_html(st),
-            render_energy_svg([], "player"),
-            render_energy_svg(st["ai_notes"], "ai", attn_scores),
-            gr.update(value=""),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=True),   # 결과 보기 → 버튼 활성화
-            gr.update(interactive=False),
-            audio_up,
-        )
-
-    # Clear the audio element first so the browser unloads any Preview src
-    # currently in its buffer — otherwise the new AI take won't autoplay.
     confirm_chain = btn_confirm.click(
-        lambda: gr.update(value=None, autoplay=False),
+        lambda: gr.update(value=""),
         inputs=None, outputs=s3_audio,
     ).then(
-        on_confirm, inputs=[state], outputs=_confirm_outputs, show_progress="full",
+        on_confirm, inputs=[state], outputs=_confirm_outputs, show_progress="hidden",
+    ).then(
+        lambda st: _nav(st, st.get("screen", "S3")), inputs=[state], outputs=[screen_nav],
+    ).then(
+        fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav],
+    ).then(
+        fn=None, js=UNLOCK_INPUT_JS, inputs=[phase_nav],
+    ).then(
+        fn=None, js=FOCUS_GAME_JS,
     )
-    confirm_chain.then(fn=None, js=PLAY_EXCHANGE_JS)
-    confirm_chain.then(fn=None, js=FOCUS_GAME_JS)
 
-    # S4 "다음 라운드" → S2
-    def on_next_round_s4(st):
+    # S4 → S2 (다음 라운드) 또는 S5 (세션 종료)
+    def on_next_from_s4(st):
+        if st["round"] >= TOTAL_ROUNDS:
+            st["phase"] = "game_over"
+            return st, _nav(st, "S5")
         st["round"] += 1
         st["exchange"] = 1
         st["exchange_log"] = []
@@ -2409,64 +2489,59 @@ with gr.Blocks(title="RespondAI") as app:
         st["phase"] = "user_input"
         st["key"] = random.choice(KEYS)
         st["bpm"] = random.choice(BPM_CHOICES)
-        return st, *_screens("S2")
+        return st, _nav(st, "S2")
 
-    btn_next_round.click(
-        on_next_round_s4, inputs=[state],
-        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    ).then(
-        lambda st: (_s2_info_html(st), *_screens("S2")),
-        inputs=[state],
-        outputs=[s2_info, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    )
-
-    # S3 "결과 보기" → S4 (비최종) 또는 S5 (최종)
-    def on_show_result(st):
-        if st["phase"] == "game_over":
-            return st, *_screens("S5")
-        return st, *_screens("S4")
-
-    def on_show_result_ui(st):
-        if st["phase"] == "game_over":
+    def on_next_from_s4_ui(st):
+        if st.get("screen") == "S5":
             return (
                 gr.update(),
                 s5_html(st),
                 render_full_history_roll(st["round_results"]),
-                *_screens("S5"),
             )
-        return (
-            s4_html(st),
-            gr.update(), gr.update(),
-            *_screens("S4"),
-        )
+        return _s2_info_html(st), gr.update(), gr.update()
+
+    btn_next_round.click(
+        on_next_from_s4, inputs=[state],
+        outputs=[state, screen_nav],
+    ).then(
+        fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav],
+    ).then(
+        on_next_from_s4_ui, inputs=[state],
+        outputs=[s2_info, s5_result_html, s5_roll],
+    )
+
+    # S3 "See result" (라운드 종료 후 수동 이동용 백업)
+    def on_show_result_nav(st):
+        sid = "S5" if st["phase"] == "game_over" else "S4"
+        return st, _nav(st, sid)
 
     btn_next_inline.click(
-        on_show_result, inputs=[state],
-        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+        on_show_result_nav, inputs=[state],
+        outputs=[state, screen_nav],
     ).then(
-        on_show_result_ui, inputs=[state],
-        outputs=[s4_result_html, s5_result_html, s5_roll,
-                 screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
+        fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav],
+    ).then(
+        _result_panel_updates, inputs=[state],
+        outputs=[s4_result_html, s5_result_html, s5_roll],
     )
 
     # Restart → S1
     def on_restart(_st):
-        return (
-            init_state(),
-            *_screens("S1"),
-        )
+        st = init_state()
+        return st, _nav(st, "S1")
 
     btn_restart.click(
         on_restart, inputs=[state],
-        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    )
+        outputs=[state, screen_nav],
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
     btn_restart_inline.click(
         on_restart, inputs=[state],
-        outputs=[state, screen_s1, screen_s2, screen_s3, screen_s4, screen_s5],
-    )
+        outputs=[state, screen_nav],
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
     app.load(fn=None, js=KEYBOARD_JS)
+    app.load(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
 
 if __name__ == "__main__":
