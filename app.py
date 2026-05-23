@@ -425,7 +425,7 @@ def render_piano_roll(state: dict) -> plt.Figure:
                     framealpha=0.82, borderpad=0.6, handlelength=1.1)
     leg.set_zorder(6)
 
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.97, bottom=0.03)
+    fig.subplots_adjust(left=0, right=1, top=0.97, bottom=0)
     return fig
 
 
@@ -465,7 +465,7 @@ def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
-    fig.subplots_adjust(left=0.012, right=0.988, top=0.97, bottom=0.03)
+    fig.subplots_adjust(left=0, right=1, top=0.97, bottom=0)
     return fig
 
 
@@ -1259,23 +1259,42 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
   align-items: center !important;
 }
 .s3-main .piano-roll-host {
-  flex: 1 1 auto !important;
-  width: 100% !important;
-  max-width: 820px !important;
+  /* figsize 9.8×2.95 — 표시 높이 222px에 맞춘 너비 (letterbox 방지) */
+  flex: 0 0 auto !important;
+  width: calc(222px * 9.8 / 2.95) !important;
+  max-width: min(100%, calc(222px * 9.8 / 2.95)) !important;
   margin: 0 auto !important;
   min-width: 0 !important;
   min-height: 222px !important;
   max-height: 222px !important;
   height: 222px !important;
   overflow: hidden !important;
+  padding: 0 !important;
+  background: transparent !important;
 }
-.s3-main .piano-roll-host .plot-container,
-.s3-main .piano-roll-host canvas {
+.s3-main .piano-roll-host .block,
+.s3-main .piano-roll-host .form,
+.s3-main .piano-roll-host .plot-container {
+  width: 100% !important;
   height: 222px !important;
   min-height: 222px !important;
   max-height: 222px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  overflow: hidden !important;
+}
+.s3-main .piano-roll-host .plot-container > *,
+.s3-main .piano-roll-host canvas,
+.s3-main .piano-roll-host img {
   width: 100% !important;
-  object-fit: contain !important;
+  height: 222px !important;
+  min-height: 222px !important;
+  max-height: 222px !important;
+  display: block !important;
+  object-fit: fill !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 .panel-s3 .ra-piano-wrap {
   flex: 0 0 auto !important;
@@ -1311,14 +1330,21 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
   animation: none !important;
 }
 .panel-s4 .piano-roll-host, .panel-s5 .piano-roll-host {
-  width: 100% !important;
-  max-width: 820px !important;
+  width: calc(190px * 9.8 / 2.6) !important;
+  max-width: min(100%, calc(190px * 9.8 / 2.6)) !important;
   margin: 0 auto !important;
+  height: 190px !important;
+  overflow: hidden !important;
+  padding: 0 !important;
 }
 .panel-s4 .plot-container, .panel-s5 .plot-container,
-.panel-s4 .piano-roll-host canvas, .panel-s5 .piano-roll-host canvas {
+.panel-s4 .piano-roll-host canvas, .panel-s5 .piano-roll-host canvas,
+.panel-s4 .piano-roll-host img, .panel-s5 .piano-roll-host img {
   max-height: 190px !important;
+  height: 190px !important;
   width: 100% !important;
+  object-fit: fill !important;
+  display: block !important;
 }
 
 /* S1 nav (amra-style) */
