@@ -2552,8 +2552,8 @@ with gr.Blocks(title="RespondAI") as app:
             str(len(st["exchange_log"])),
         )
 
-        # 재생이 끝난 뒤에만 UI 갱신 (별도 .then + stale state 방지). s3_audio 는 건드리지 않음.
-        time.sleep(min(playback_ms / 1000.0 + 1.0, 24.0))
+        # 재생 종료 직후 YOUR TURN (짧은 버퍼만 — 이전 +1.0s 제거)
+        time.sleep(min(playback_ms / 1000.0 + 0.15, 24.0))
 
         completed = len(st["exchange_log"])
         if completed < MAX_EXCHANGES:
