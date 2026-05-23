@@ -25,7 +25,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 import gradio as gr
 
-from data.tokenizer import Note, STEPS_PER_BAR
+from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
 from input.piano import synth_notes
 from inference.generate import load_model_for_inference, generate
@@ -362,6 +362,39 @@ def _gradient_image(h: int = 440, w: int = 1320) -> np.ndarray:
 
 _GRADIENT_IMG = _gradient_image()
 
+# 피아노롤 표시용 기본 세로 범위 (입력 없을 때)
+ROLL_PITCH_DEFAULT_LO, ROLL_PITCH_DEFAULT_HI = 55, 80
+
+
+def _clip_notes_to_slot(notes: List[Note], slot_width: int = EXCHANGE_STEPS) -> List[Note]:
+    """EX 슬롯 밖으로 그려지지 않도록 타임라인 클립."""
+    clipped: List[Note] = []
+    for n in notes:
+        if n.start >= slot_width:
+            continue
+        s = max(0, n.start)
+        e = max(s + 1, min(n.end, slot_width))
+        clipped.append(Note(n.pitch, s, e))
+    return clipped
+
+
+def _roll_pitch_range(note_groups: List[List[Note]]) -> tuple[int, int]:
+    """실제 노트 피치에 맞춘 y축 (건반·모델 범위 내)."""
+    pitches = [n.pitch for group in note_groups for n in group]
+    if not pitches:
+        return ROLL_PITCH_DEFAULT_LO, ROLL_PITCH_DEFAULT_HI
+    lo = max(PITCH_MIN, min(pitches) - 4)
+    hi = min(PITCH_MAX, max(pitches) + 4)
+    if hi - lo < 12:
+        mid = (lo + hi) // 2
+        lo = max(PITCH_MIN, mid - 6)
+        hi = min(PITCH_MAX, mid + 6)
+    return lo, hi
+
+
+def _current_exchange_index(state: dict) -> int:
+    return max(0, min(int(state.get("exchange", 1)) - 1, MAX_EXCHANGES - 1))
+
 
 def _draw_roll_notes(ax, notes, x_offset, color, alpha=0.95, linewidth=0.9):
     for n in notes:
@@ -381,7 +414,16 @@ def render_piano_roll(state: dict) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(9.8, 2.95), dpi=ROLL_DPI)
     fig.patch.set_alpha(0.0)
 
-    pitch_lo, pitch_hi = 40, 90
+    exchange_log = state.get("exchange_log", [])
+    current_notes = state.get("current_notes", [])
+    cur_ex_idx = _current_exchange_index(state)
+    all_groups: List[List[Note]] = []
+    for entry in exchange_log:
+        all_groups.append(entry.get("user_notes") or [])
+        all_groups.append(entry.get("ai_notes") or [])
+    all_groups.append(current_notes)
+
+    pitch_lo, pitch_hi = _roll_pitch_range(all_groups)
     x0, x1 = 0, MAX_EXCHANGES * EXCHANGE_STEPS
 
     ax.imshow(_GRADIENT_IMG, extent=[x0, x1, pitch_lo, pitch_hi],
@@ -401,14 +443,20 @@ def render_piano_roll(state: dict) -> plt.Figure:
                 color="#3A3A55", fontsize=9, fontweight="bold",
                 alpha=0.7, zorder=3)
 
-    for i, entry in enumerate(state["exchange_log"]):
-        _draw_roll_notes(ax, entry["user_notes"], i * EXCHANGE_STEPS, NOTE_USER_COLOR)
-        _draw_roll_notes(ax, entry["ai_notes"],   i * EXCHANGE_STEPS, NOTE_AI_COLOR)
+    for i, entry in enumerate(exchange_log):
+        off = i * EXCHANGE_STEPS
+        _draw_roll_notes(
+            ax, _clip_notes_to_slot(entry.get("user_notes") or []), off, NOTE_USER_COLOR,
+        )
+        _draw_roll_notes(
+            ax, _clip_notes_to_slot(entry.get("ai_notes") or []), off, NOTE_AI_COLOR,
+        )
 
-    # Current (unconfirmed) notes in current exchange slot
-    cur_ex_idx = state["exchange"] - 1
-    _draw_roll_notes(ax, state["current_notes"], cur_ex_idx * EXCHANGE_STEPS,
-                     NOTE_USER_COLOR, alpha=0.5)
+    # 입력 중(미확정) 유저 노트 — 현재 EX 슬롯, 반투명
+    _draw_roll_notes(
+        ax, _clip_notes_to_slot(current_notes), cur_ex_idx * EXCHANGE_STEPS,
+        NOTE_USER_COLOR, alpha=0.5,
+    )
 
     ax.set_xlim(x0, x1)
     ax.set_ylim(pitch_lo, pitch_hi)
@@ -435,9 +483,14 @@ def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(9.8, 2.6), dpi=ROLL_DPI)
     fig.patch.set_alpha(0.0)
 
-    pitch_lo, pitch_hi = 40, 90
     round_width = MAX_EXCHANGES * EXCHANGE_STEPS + 16
     total_width = max(len(round_results) * round_width, 1)
+    all_groups: List[List[Note]] = []
+    for rr in round_results:
+        for entry in rr.get("exchange_log", []):
+            all_groups.append(entry.get("user_notes") or [])
+            all_groups.append(entry.get("ai_notes") or [])
+    pitch_lo, pitch_hi = _roll_pitch_range(all_groups)
 
     ax.imshow(_GRADIENT_IMG, extent=[0, total_width, pitch_lo, pitch_hi],
               aspect="auto", origin="upper", zorder=0,
@@ -454,10 +507,14 @@ def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
                 alpha=0.7, zorder=3)
         for ex_idx, entry in enumerate(rr["exchange_log"]):
             ex_offset = r_offset + ex_idx * EXCHANGE_STEPS
-            _draw_roll_notes(ax, entry["user_notes"], ex_offset,
-                             NOTE_USER_COLOR, linewidth=0.6)
-            _draw_roll_notes(ax, entry["ai_notes"], ex_offset,
-                             NOTE_AI_COLOR, linewidth=0.6)
+            _draw_roll_notes(
+                ax, _clip_notes_to_slot(entry.get("user_notes") or []), ex_offset,
+                NOTE_USER_COLOR, linewidth=0.6,
+            )
+            _draw_roll_notes(
+                ax, _clip_notes_to_slot(entry.get("ai_notes") or []), ex_offset,
+                NOTE_AI_COLOR, linewidth=0.6,
+            )
 
     ax.set_xlim(0, total_width)
     ax.set_ylim(pitch_lo, pitch_hi)
@@ -2410,7 +2467,7 @@ with gr.Blocks(title="RespondAI") as app:
     round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
 
     def on_note_event(midi: int, st: dict):
-        """건반 입력 — 피아노롤(Plot)·HUD는 갱신하지 않음 (매 키마다 재렌더 시 검정 화면)."""
+        """건반 입력 — 노트 목록 + 피아노롤(미확정 노트 반투명)."""
         notes = st["current_notes"]
         if st["phase"] == "user_input":
             if midi == -1:
@@ -2421,9 +2478,9 @@ with gr.Blocks(title="RespondAI") as app:
                 st["current_notes"] = notes + [
                     Note(midi, i * DEFAULT_DURATION, (i + 1) * DEFAULT_DURATION)
                 ]
-        return st, note_list_html(st["current_notes"])
+        return st, note_list_html(st["current_notes"]), render_piano_roll(st)
 
-    _note_outputs = [state, s3_note_list]
+    _note_outputs = [state, s3_note_list, s3_roll]
 
     _note_click_kw = dict(show_progress="hidden")
 
@@ -2442,7 +2499,7 @@ with gr.Blocks(title="RespondAI") as app:
     def on_cancel(st):
         if st["phase"] == "user_input" and st["current_notes"]:
             st["current_notes"] = st["current_notes"][:-1]
-        return st, note_list_html(st["current_notes"])
+        return st, note_list_html(st["current_notes"]), render_piano_roll(st)
 
     btn_cancel.click(on_cancel, inputs=[state], outputs=_note_outputs, **_note_click_kw)
 
