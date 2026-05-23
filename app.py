@@ -396,6 +396,14 @@ def _current_exchange_index(state: dict) -> int:
     return max(0, min(int(state.get("exchange", 1)) - 1, MAX_EXCHANGES - 1))
 
 
+def _finalize_roll_figure(fig, ax) -> None:
+    """피그마 여백 제거 — 상단 검은 띠(투명 fig + dark 패널) 방지."""
+    fig.patch.set_alpha(1.0)
+    fig.patch.set_facecolor("#141414")
+    ax.set_position([0.0, 0.0, 1.0, 1.0])
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
+
+
 def _draw_roll_notes(ax, notes, x_offset, color, alpha=0.95, linewidth=0.9):
     for n in notes:
         width = max(n.end - n.start, 1)
@@ -412,7 +420,6 @@ def _draw_roll_notes(ax, notes, x_offset, color, alpha=0.95, linewidth=0.9):
 def render_piano_roll(state: dict) -> plt.Figure:
     plt.close("all")
     fig, ax = plt.subplots(figsize=(9.8, 2.95), dpi=ROLL_DPI)
-    fig.patch.set_alpha(0.0)
 
     exchange_log = state.get("exchange_log", [])
     current_notes = state.get("current_notes", [])
@@ -467,13 +474,22 @@ def render_piano_roll(state: dict) -> plt.Figure:
 
     user_patch = mpatches.Patch(facecolor=NOTE_USER_COLOR, edgecolor="white", label="You")
     ai_patch   = mpatches.Patch(facecolor=NOTE_AI_COLOR, edgecolor="white", label="AI")
-    leg = ax.legend(handles=[user_patch, ai_patch], loc="lower right",
-                    facecolor="white", edgecolor="none",
-                    labelcolor="#2A2A40", fontsize=8.5,
-                    framealpha=0.82, borderpad=0.6, handlelength=1.1)
+    leg = ax.legend(
+        handles=[user_patch, ai_patch],
+        loc="lower right",
+        bbox_to_anchor=(0.99, 0.02),
+        bbox_transform=ax.transAxes,
+        facecolor="white",
+        edgecolor="none",
+        labelcolor="#2A2A40",
+        fontsize=8.5,
+        framealpha=0.82,
+        borderpad=0.6,
+        handlelength=1.1,
+    )
     leg.set_zorder(6)
 
-    fig.subplots_adjust(left=0, right=1, top=0.97, bottom=0)
+    _finalize_roll_figure(fig, ax)
     return fig
 
 
@@ -481,7 +497,6 @@ def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
     """Piano roll showing all rounds (for S4/S5)."""
     plt.close("all")
     fig, ax = plt.subplots(figsize=(9.8, 2.6), dpi=ROLL_DPI)
-    fig.patch.set_alpha(0.0)
 
     round_width = MAX_EXCHANGES * EXCHANGE_STEPS + 16
     total_width = max(len(round_results) * round_width, 1)
@@ -522,7 +537,7 @@ def render_full_history_roll(round_results: List[dict]) -> plt.Figure:
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
-    fig.subplots_adjust(left=0, right=1, top=0.97, bottom=0)
+    _finalize_roll_figure(fig, ax)
     return fig
 
 
@@ -1314,42 +1329,64 @@ button.primary:hover, .primary button:hover, [data-testid="primary"]:hover {
 .s3-roll-row {
   justify-content: center !important;
   align-items: center !important;
+  gap: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
 }
 .s3-main .piano-roll-host {
   /* figsize 9.8×2.95 — 표시 높이 222px에 맞춘 너비 (letterbox 방지) */
+  --roll-h: 222px;
+  --roll-w: calc(var(--roll-h) * 9.8 / 2.95);
   flex: 0 0 auto !important;
-  width: calc(222px * 9.8 / 2.95) !important;
-  max-width: min(100%, calc(222px * 9.8 / 2.95)) !important;
+  width: var(--roll-w) !important;
+  max-width: min(100%, var(--roll-w)) !important;
   margin: 0 auto !important;
   min-width: 0 !important;
-  min-height: 222px !important;
-  max-height: 222px !important;
-  height: 222px !important;
+  height: var(--roll-h) !important;
+  min-height: var(--roll-h) !important;
+  max-height: var(--roll-h) !important;
   overflow: hidden !important;
   padding: 0 !important;
-  background: transparent !important;
+  gap: 0 !important;
+  background: #141414 !important;
+  border: none !important;
+  line-height: 0 !important;
 }
 .s3-main .piano-roll-host .block,
 .s3-main .piano-roll-host .form,
+.s3-main .piano-roll-host .column,
 .s3-main .piano-roll-host .plot-container {
   width: 100% !important;
-  height: 222px !important;
-  min-height: 222px !important;
-  max-height: 222px !important;
+  height: var(--roll-h) !important;
+  min-height: var(--roll-h) !important;
+  max-height: var(--roll-h) !important;
   margin: 0 !important;
   padding: 0 !important;
-  background: transparent !important;
+  gap: 0 !important;
+  background: #141414 !important;
+  border: none !important;
   overflow: hidden !important;
+  line-height: 0 !important;
 }
 .s3-main .piano-roll-host .plot-container > *,
 .s3-main .piano-roll-host canvas,
-.s3-main .piano-roll-host img {
+.s3-main .piano-roll-host img,
+.s3-main .piano-roll-host svg {
   width: 100% !important;
-  height: 222px !important;
-  min-height: 222px !important;
-  max-height: 222px !important;
+  height: var(--roll-h) !important;
+  min-height: var(--roll-h) !important;
+  max-height: var(--roll-h) !important;
   display: block !important;
   object-fit: fill !important;
+  object-position: center top !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  vertical-align: top !important;
+}
+.s3-main .piano-roll-host .empty,
+.s3-main .piano-roll-host label {
+  display: none !important;
+  height: 0 !important;
   margin: 0 !important;
   padding: 0 !important;
 }
