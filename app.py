@@ -7,6 +7,7 @@ import random
 import time
 import wave as _wave
 from typing import List, Optional
+import time
 
 import matplotlib
 matplotlib.use("Agg")
@@ -25,11 +26,12 @@ import matplotlib.patches as mpatches
 import numpy as np
 import gradio as gr
 
+from concurrent.futures import ThreadPoolExecutor
 from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
 from input.piano import synth_notes
 from inference.generate import load_model_for_inference, generate
-from inference.decode import notes_to_wav
+#from inference.decode import notes_to_wav
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -315,10 +317,13 @@ def build_round_audio(
 ) -> tuple:
     """Return (sample_rate, int16_mono) for audio synthesis."""
     gap = np.zeros(int(0.15 * SAMPLE_RATE), dtype=np.float32)
-    user_wav = synth_notes(user_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="user")
-    ai_wav = synth_notes(
-        ai_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="ai", tail_sec=0.05,
-    )
+    
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_user = ex.submit(synth_notes, user_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="user")
+        f_ai   = ex.submit(synth_notes, ai_notes,   bpm=bpm, sample_rate=SAMPLE_RATE, role="ai", tail_sec=0.05)
+        user_wav = f_user.result()
+        ai_wav   = f_ai.result()
+        
     ai_max_samples = int(AI_RESPONSE_MAX_SEC * SAMPLE_RATE)
     if len(ai_wav) > ai_max_samples:
         ai_wav = ai_wav[:ai_max_samples]
@@ -2594,6 +2599,9 @@ with gr.Blocks(title="RespondAI") as app:
             yield (st,) + _CONFIRM_NOOP + (_phase(st), str(len(st["exchange_log"])))
             return
 
+        _T = {}
+        _T["start"] = time.time()
+        
         user_notes = list(st["current_notes"])
         key_token = KEY_TO_TOKEN[st["key"]]
         exchange_num = len(st["exchange_log"]) + 1
@@ -2605,6 +2613,7 @@ with gr.Blocks(title="RespondAI") as app:
             '<span class="ra-help-dot">●</span> AI is composing a response…'
             '</div>'
         )
+        _T["before_yield1"] = time.time()
         yield (
             st,
             render_piano_roll(st), thinking_msg, hud_html(st),
@@ -2619,21 +2628,32 @@ with gr.Blocks(title="RespondAI") as app:
             "ai_response",
             str(len(st["exchange_log"])),
         )
+        _T["after_yield1"] = time.time()
+        print(f"[TIMING] yield1(thinking) render: {_T['after_yield1'] - _T['before_yield1']:.3f}s")
+
 
         max_bars, max_new_tokens = generation_limits(user_notes)
+        _T["before_generate"] = time.time()
+        #t0 = time.time()
         result = generate(
             _MODEL, _TOKENIZER, user_notes,
             key=key_token, tempo=st["bpm"],
             max_bars=max_bars,
             max_new_tokens=max_new_tokens,
             temperature=0.95,
+            return_attention=False,
         )
+        _T["after_generate"] = time.time()
+        print(f"[TIMING] generate(): {_T['after_generate'] - _T['before_generate']:.3f}s")
         ai_notes = fit_ai_response_to_user(result.response_notes, user_notes, st["bpm"])
         attn_scores = align_attn_to_notes(result.attn_scores, ai_notes)
+
+        _T["before_score"] = time.time()
         score = compute_exchange_score(
             user_notes, st["ai_notes"], st["r1_motif"],
             st["round"], exchange_num, key_token,
         )
+        _T["after_score"] = time.time()
 
         if st["round"] == 1 and exchange_num == 1 and user_notes:
             st["r1_motif"] = user_notes
@@ -2647,7 +2667,10 @@ with gr.Blocks(title="RespondAI") as app:
         st["ai_notes"] = ai_notes
         st["current_notes"] = []
 
+        _T["before_audio"] = time.time()
         audio = build_round_audio(user_notes, ai_notes, st["bpm"])
+        _T["after_audio"] = time.time()
+        print(f"[TIMING] build_round_audio(): {_T['after_audio'] - _T['before_audio']:.3f}s")
         playback_ms = max(
             estimate_playback_ms(user_notes, ai_notes, st["bpm"]),
             audio_duration_ms(audio),
@@ -2657,6 +2680,7 @@ with gr.Blocks(title="RespondAI") as app:
             '<span class="ra-help-dot">●</span> Playing AI response…'
             '</div>'
         )
+        _T["before_yield2"] = time.time()
         yield (
             st,
             render_piano_roll(st), playing_msg, hud_html(st),
@@ -2671,9 +2695,23 @@ with gr.Blocks(title="RespondAI") as app:
             "ai_response",
             str(len(st["exchange_log"])),
         )
+        _T["after_yield2"] = time.time()
+        print(f"[TIMING] yield2(playing) render: {_T['after_yield2'] - _T['before_yield2']:.3f}s")
+
 
         # 재생 종료 직후 YOUR TURN (짧은 버퍼만 — 이전 +1.0s 제거)
-        time.sleep(min(playback_ms / 1000.0 + 0.15, 24.0))
+        time.sleep(0.3)
+        _T["end"] = time.time()
+        print(f"[TIMING] ─────────────────────────────")
+        print(f"[TIMING] 전체 on_confirm 서버 처리: {_T['end'] - _T['start']:.3f}s")
+        print(f"[TIMING]   yield1 render  : {_T['after_yield1'] - _T['before_yield1']:.3f}s")
+        print(f"[TIMING]   generate()     : {_T['after_generate'] - _T['before_generate']:.3f}s")
+        print(f"[TIMING]   score()        : {_T['after_score'] - _T['before_score']:.3f}s")
+        print(f"[TIMING]   audio()        : {_T['after_audio'] - _T['before_audio']:.3f}s")
+        print(f"[TIMING]   yield2 render  : {_T['after_yield2'] - _T['before_yield2']:.3f}s")
+        print(f"[TIMING]   sleep          : 0.300s (fixed)")
+        print(f"[TIMING] ─────────────────────────────")
+
 
         completed = len(st["exchange_log"])
         if completed < MAX_EXCHANGES:
@@ -2711,6 +2749,23 @@ with gr.Blocks(title="RespondAI") as app:
                 _phase(st),
                 str(completed),
             )
+    COMBINED_JS = """(screenId, phase) => {
+      const id = String(screenId || 'S1').trim().toUpperCase();
+      const target = 'panel-' + id.toLowerCase();
+      const roots = [document];
+      document.querySelectorAll('gradio-app, .gradio-container').forEach((h) => {
+        if (h.shadowRoot) roots.push(h.shadowRoot);
+      });
+      for (const root of roots) {
+        root.querySelectorAll('.game-stage .game-panel, .game-panel.panel-s1, .game-panel.panel-s2, .game-panel.panel-s3, .game-panel.panel-s4, .game-panel.panel-s5').forEach((el) => {
+          if (el.classList.contains(target)) el.classList.remove('hide');
+          else el.classList.add('hide');
+        });
+      }
+      if (phase) window._raPhase = String(phase).trim();
+      const ae = document.activeElement;
+      if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+    }"""
 
     confirm_chain = btn_confirm.click(
         lambda: gr.update(value=""),
@@ -2720,11 +2775,7 @@ with gr.Blocks(title="RespondAI") as app:
     ).then(
         lambda st: _nav(st, st.get("screen", "S3")), inputs=[state], outputs=[screen_nav],
     ).then(
-        fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav],
-    ).then(
-        fn=None, js=UNLOCK_INPUT_JS, inputs=[phase_nav],
-    ).then(
-        fn=None, js=FOCUS_GAME_JS,
+        fn=None, js=COMBINED_JS, inputs=[screen_nav, phase_nav],
     )
 
     # S4 → S2 (다음 라운드) 또는 S5 (세션 종료)
