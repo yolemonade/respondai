@@ -297,4 +297,5 @@ def load_model_for_inference(
     model = RespondAITransformer(mcfg).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
+    model = torch.compile(model, mode="reduce-overhead")
     return model, tokenizer, device
