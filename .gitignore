@@ -29,3 +29,8 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+prompt.md
+docs/FRONTEND.md
+docs/GAMERULE.md
+docs/PLAN.md
