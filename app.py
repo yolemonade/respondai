@@ -262,19 +262,31 @@ def compute_exchange_score(
         rhythm_score = tmp["rhythm_similarity"]
         rhythm_raw = tmp["raw"]["rhythm_pearson"]
 
-    # Key consistency and creativity: use ai_prev (or empty placeholder)
+    # Key consistency: always computable
     base = score_response(ai_prev_notes or user_notes, user_notes, key_token)
     key_score = base["key_consistency"]
-    creativity = base["creativity_bonus"]
+
+    # Creativity: comparing user vs AI-prev; auto-award if no AI response yet
+    if not ai_prev_notes or exchange_num == 1:
+        creativity = 50
+    else:
+        creativity = base["creativity_bonus"]
 
     # Motif: compare against r1_motif (or ai_prev if no motif yet)
-    if r1_motif:
+    # r1_motif needs ≥3 notes to form n-grams (n=3 → 2 intervals); auto-300 if too short
+    if r1_motif and len(r1_motif) >= 3:
         motif_res = score_response(r1_motif, user_notes, key_token)
         motif_score = motif_res["motif_usage"]
         motif_raw = motif_res["raw"]["motif_overlap"]
+    elif r1_motif and len(r1_motif) < 3:
+        # Motif too short to score — award full to avoid penalising player unfairly
+        motif_score = 300
+        motif_raw = 1.0
     else:
         motif_score = base["motif_usage"]
         motif_raw = base["raw"]["motif_overlap"]
+
+    print(f"[SCORE] R{round_num}/E{exchange_num} | key={key_score} rhythm={rhythm_score} motif={motif_score} creativity={creativity} | r1_motif_len={len(r1_motif)} user_len={len(user_notes)} ai_prev_len={len(ai_prev_notes)} | motif_raw={motif_raw:.3f}")
 
     total = key_score + rhythm_score + motif_score + creativity
 
@@ -807,6 +819,52 @@ KEYBOARD_JS = """() => {
     const btn = gradioBtn('btn-confirm');
     if (btn && !btn.disabled) btn.click();
   }
+  window.raClickConfirm = clickConfirm;
+
+  // ── 허밍 모드 헬퍼 ─────────────────────────────────────────────────────
+  // S3 마이크 호스트가 보이면 허밍 모드(녹음 입력) 상태.
+  function hummingMicHost() {
+    const roots = [document];
+    document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
+      if (h.shadowRoot) roots.push(h.shadowRoot);
+    });
+    for (const root of roots) {
+      const host = root.querySelector('#s3-mic-host');
+      if (host && isVisible(host)) return host;
+    }
+    return null;
+  }
+  // gr.Audio 의 "정지(Stop)" 버튼 — 녹음 중일 때만 존재(aria-label) 한다.
+  function micStopButton() {
+    const host = hummingMicHost();
+    if (!host) return null;
+    return host.querySelector('button[aria-label="Stop recording"]')
+        || host.querySelector('button[aria-label*="Stop"]')
+        || host.querySelector('.stop-button, button.stop-button')
+        || null;
+  }
+  function isMicRecording() {
+    return !!window.raIsRecording || !!micStopButton();
+  }
+  // Enter(허밍): 녹음 중이면 정지→인식→자동 전송, 정지 상태면 바로 전송.
+  window.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' || e.repeat) return;
+    if (!hummingMicHost()) return;           // 허밍 S3 화면이 아닐 때는 무시
+    if (isInputLocked()) return;             // AI 응답 중에는 무시
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (isMicRecording()) {
+      const stop = micStopButton();
+      if (stop) {
+        window.raHummingAutoConfirm = true;  // 인식 완료 후 자동 전송 플래그
+        stop.click();                        // → stop_recording → PESTO 인식
+      } else {
+        clickConfirm();
+      }
+    } else {
+      clickConfirm();                        // 이미 정지 상태 → 바로 전송
+    }
+  }, true);
 
   /* ─── UI 효과음 (Web Audio) ─── */
   function playBell(freq, t0, dur, peak, type) {
@@ -1037,6 +1095,18 @@ STOP_AUDIO_JS = """() => {
 FOCUS_GAME_JS = """() => {
   const ae = document.activeElement;
   if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+}"""
+
+# 허밍 녹음 시작 — JS 플래그만 세팅 (서버 왕복 없음)
+MIC_START_JS = """() => { window.raIsRecording = true; }"""
+
+# 허밍 인식(stop_recording) 완료 후 — Enter 로 정지했으면 자동 전송
+MIC_AFTER_STOP_JS = """() => {
+  window.raIsRecording = false;
+  if (window.raHummingAutoConfirm) {
+    window.raHummingAutoConfirm = false;
+    if (window.raClickConfirm) window.raClickConfirm();
+  }
 }"""
 
 UNLOCK_INPUT_JS = """(phase) => {
@@ -2792,7 +2862,7 @@ with gr.Blocks(title="RespondAI") as app:
                                elem_classes=["s3-mic-host"]) as s3_mic_host:
                     s3_mic = gr.Audio(
                         sources=["microphone"], type="numpy", format="wav",
-                        label="🎤 Hum your melody, then stop recording",
+                        label="🎤 Press record, hum, then press Enter (or Stop)",
                         show_label=True, elem_id="s3-mic-input",
                     )
                 s3_note_list = gr.HTML(note_list_html([]), elem_classes=["ra-note-list-host"])
@@ -2983,11 +3053,14 @@ with gr.Blocks(title="RespondAI") as app:
             render_energy_svg(st["current_notes"], "player"),
         )
 
+    # 녹음 시작 → JS 플래그 (Enter 자동정지 판단용)
+    s3_mic.start_recording(fn=None, js=MIC_START_JS)
+    # 정지 → PESTO 인식(프로세싱 표시 숨김) → Enter 로 정지했다면 자동 전송
     s3_mic.stop_recording(
         on_humming_record, inputs=[s3_mic, state],
         outputs=[state, s3_note_list, s3_roll, s3_viz_player],
-        show_progress="minimal",
-    )
+        show_progress="hidden",
+    ).then(fn=None, js=MIC_AFTER_STOP_JS)
 
     def on_preview(st):
         yield gr.update(value="")
