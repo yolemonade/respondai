@@ -38,7 +38,7 @@ from inference.generate import load_model_for_inference, generate
 MAX_EXCHANGES  = 3
 MAX_NOTES      = 16
 DEFAULT_DURATION = 2   # sixteenth-note steps per note slot
-TOTAL_ROUNDS   = 2  # TODO: 테스트용 임시값, 발표 전 5로 복원
+TOTAL_ROUNDS   = 5
 AI_MODE        = "model"
 
 CHECKPOINT_PATH = "checkpoints/best_inference.pt"

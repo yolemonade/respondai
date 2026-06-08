@@ -53,8 +53,7 @@ model, tokenizer, device = load_model_for_inference(
 )
 ```
 
-Cache `(model, tokenizer)` in Streamlit's `@st.cache_resource`. The model is
-read-only during inference; safe to share across reruns.
+앱 시작 시 1회 로드하고 모듈 수준 변수로 캐시한다 (Gradio는 앱이 한 번 기동되면 상태를 유지하므로 별도 캐시 데코레이터 불필요). The model is read-only during inference; safe to share across sessions.
 
 ---
 
@@ -145,8 +144,9 @@ audio = notes_to_wav(
     sample_rate=22050,
     sound_font="/path/to/GeneralUser.sf2",  # optional; can be None on Linux with default sf2
 )
-# audio is float32 mono. Hand it to st.audio:
-st.audio(audio, sample_rate=22050)
+# audio is float32 mono. Gradio에서는 (sample_rate, int16_array) 튜플로 변환해서 gr.Audio에 전달:
+# audio_int16 = (audio * 32767).astype(np.int16)
+# gr.Audio(value=(22050, audio_int16))
 ```
 
 On Mac, install FluidSynth with `brew install fluid-synth`. The default
