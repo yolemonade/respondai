@@ -2769,8 +2769,11 @@ with gr.Blocks(title="RespondAI") as app:
         print(f"[TIMING] yield2(playing) render: {_T['after_yield2'] - _T['before_yield2']:.3f}s")
 
 
-        # 재생 종료 직후 YOUR TURN (짧은 버퍼만 — 이전 +1.0s 제거)
-        time.sleep(0.3)
+        # 마지막 교환(3번째 AI 응답)은 AI 소리를 끝까지 들은 뒤 결과 화면(S4)으로,
+        # 그 외 교환은 짧은 버퍼만 두고 바로 다음 입력(YOUR TURN)으로.
+        is_last_exchange = len(st["exchange_log"]) >= MAX_EXCHANGES
+        _wait_sec = max(0.3, playback_ms / 1000.0) if is_last_exchange else 0.3
+        time.sleep(_wait_sec)
         _T["end"] = time.time()
         print(f"[TIMING] ─────────────────────────────")
         print(f"[TIMING] 전체 on_confirm 서버 처리: {_T['end'] - _T['start']:.3f}s")
@@ -2779,7 +2782,7 @@ with gr.Blocks(title="RespondAI") as app:
         print(f"[TIMING]   score()        : {_T['after_score'] - _T['before_score']:.3f}s")
         print(f"[TIMING]   audio()        : {_T['after_audio'] - _T['before_audio']:.3f}s")
         print(f"[TIMING]   yield2 render  : {_T['after_yield2'] - _T['before_yield2']:.3f}s")
-        print(f"[TIMING]   sleep          : 0.300s (fixed)")
+        print(f"[TIMING]   sleep          : {_wait_sec:.3f}s ({'full playback' if is_last_exchange else 'buffer'})")
         print(f"[TIMING] ─────────────────────────────")
 
 
