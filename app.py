@@ -29,7 +29,7 @@ import gradio as gr
 from concurrent.futures import ThreadPoolExecutor
 from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
-from input.piano import synth_notes
+from input.piano import synth_notes, mock_ai_response
 from input.humming import humming_to_notes
 from inference.generate import load_model_for_inference, generate
 #from inference.decode import notes_to_wav
@@ -165,6 +165,34 @@ def align_attn_to_notes(attn_scores: List[float], notes: List[Note]) -> List[flo
 print(f"[RespondAI] Loading model from {CHECKPOINT_PATH} ...")
 _MODEL, _TOKENIZER, _DEVICE = load_model_for_inference(CHECKPOINT_PATH)
 print(f"[RespondAI] Model ready on {_DEVICE} ({sum(p.numel() for p in _MODEL.parameters()):,} params)")
+
+
+def generate_ai_notes(user_notes: List[Note], key_token: str, bpm: int):
+    """AI 응답 생성 — 모델이 빈 응답(즉시 EOS)을 내면 재시도 후 폴백.
+
+    모델은 짧은 입력에서 즉시 EOS 를 자주 내보내 response_notes 가 비고,
+    그 경우 피아노롤에 AI(빨강) 노트가 그려지지 않는다. 항상 보이도록:
+      1) 1차 생성 → 비면 온도 낮춰 1회 재시도
+      2) 그래도 비면 유저 멜로디 옥타브 변형(mock)으로 폴백
+    Returns (ai_notes, result)  — result 는 마지막 generate 결과(attn 용).
+    """
+    max_bars, max_new_tokens = generation_limits(user_notes)
+    result = None
+    for temp in (0.95, 0.8):
+        result = generate(
+            _MODEL, _TOKENIZER, user_notes,
+            key=key_token, tempo=bpm,
+            max_bars=max_bars, max_new_tokens=max_new_tokens,
+            temperature=temp, return_attention=False,
+        )
+        ai_notes = fit_ai_response_to_user(result.response_notes, user_notes, bpm)
+        if ai_notes:
+            return ai_notes, result
+
+    # 폴백: 유저 입력 옥타브 변형(항상 비어있지 않음) → 입력 없으면 빈 채로 반환
+    fallback = mock_ai_response(user_notes) if user_notes else []
+    ai_notes = fit_ai_response_to_user(fallback, user_notes, bpm) or fallback
+    return ai_notes, result
 
 
 # ─── State helpers ───────────────────────────────────────────────────────────
@@ -2683,21 +2711,11 @@ with gr.Blocks(title="RespondAI") as app:
         print(f"[TIMING] yield1(thinking) render: {_T['after_yield1'] - _T['before_yield1']:.3f}s")
 
 
-        max_bars, max_new_tokens = generation_limits(user_notes)
         _T["before_generate"] = time.time()
-        #t0 = time.time()
-        result = generate(
-            _MODEL, _TOKENIZER, user_notes,
-            key=key_token, tempo=st["bpm"],
-            max_bars=max_bars,
-            max_new_tokens=max_new_tokens,
-            temperature=0.95,
-            return_attention=False,
-        )
+        ai_notes, result = generate_ai_notes(user_notes, key_token, st["bpm"])
         _T["after_generate"] = time.time()
         print(f"[TIMING] generate(): {_T['after_generate'] - _T['before_generate']:.3f}s")
-        ai_notes = fit_ai_response_to_user(result.response_notes, user_notes, st["bpm"])
-        attn_scores = align_attn_to_notes(result.attn_scores, ai_notes)
+        attn_scores = align_attn_to_notes(result.attn_scores if result else [], ai_notes)
 
         _T["before_score"] = time.time()
         score = compute_exchange_score(
