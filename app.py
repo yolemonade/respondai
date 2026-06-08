@@ -869,6 +869,12 @@ KEYBOARD_JS = """() => {
         document.querySelectorAll('.ra-modal.open').forEach(m => m.classList.remove('open'));
         document.documentElement.classList.remove('ra-modal-locked');
       },
+      howtoTab(name, btn) {
+        const card = btn.closest('.ra-modal-card');
+        if (!card) return;
+        card.querySelectorAll('.ra-howto-tab').forEach(t => t.classList.toggle('active', t === btn));
+        card.querySelectorAll('.ra-howto-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === name));
+      },
     };
     window.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' && document.querySelector('.ra-modal.open')) {
@@ -894,6 +900,16 @@ KEYBOARD_JS = """() => {
     if (e.key === 'Enter' || e.key === 'Backspace') return true;
     return midiFromEvent(e) !== null;
   }
+
+  // 옥타브 이동: Shift + ↑ / ↓ (입력 잠금 중이 아닐 때)
+  window.addEventListener('keydown', function(e) {
+    if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    if (isInputLocked()) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.key === 'ArrowUp')   baseOctave = Math.min(6, baseOctave + 1);
+    if (e.key === 'ArrowDown') baseOctave = Math.max(2, baseOctave - 1);
+  }, true);
 
   window.addEventListener('keydown', function(e) {
     if (!isGameKey(e)) return;
@@ -2271,6 +2287,80 @@ button.pill-cta.pill-cta-primary:hover {
   font-style: normal;
 }
 .ra-modal-locked { overflow: hidden !important; }
+
+/* How to Play — 탭형 모달 */
+.ra-howto-card { width: min(600px, 100%); }
+.ra-howto-tabs {
+  display: flex; gap: 6px;
+  margin: 2px 0 14px;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+}
+.ra-howto-tab {
+  appearance: none; background: transparent; border: none;
+  padding: 8px 12px 10px; margin-bottom: -1px;
+  font-family: inherit; font-size: 13px; font-weight: 500;
+  color: var(--light-sub); cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.ra-howto-tab:hover { color: var(--light-h); }
+.ra-howto-tab.active { color: var(--accent-deep); border-bottom-color: var(--accent); }
+.ra-howto-pane { display: none; animation: ra-modal-fade 0.18s ease-out; }
+.ra-howto-pane.active { display: block; }
+.ra-howto-h { margin: 4px 0 10px; font-size: 15px; font-weight: 600; color: var(--light-h); }
+.ra-howto-sub { margin: 0 0 14px; font-size: 12.5px; color: #565660; }
+.ra-howto-dim { color: #7A7A84; font-size: 12.5px; }
+
+/* 키보드 단축키 표 — 코드블록 스타일 */
+.ra-key-table {
+  margin-top: 14px; padding: 12px 14px;
+  background: #F4F3EF; border: 1px solid rgba(0,0,0,0.07);
+  border-radius: 10px; font-size: 12.5px;
+}
+.ra-key-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+.ra-key-label {
+  flex: 0 0 96px; color: #565660; font-size: 11.5px;
+  letter-spacing: 0.3px;
+}
+.ra-key-row kbd {
+  display: inline-block; background: #FFFFFF;
+  border: 1px solid rgba(0,0,0,0.12); border-bottom-width: 2px;
+  border-radius: 4px; padding: 1px 6px; margin: 0 2px;
+  font-size: 11px; color: #2E2E36; font-family: 'Inter', monospace;
+}
+
+/* 점수 항목 — 좌측 색상 포인트 바 */
+.ra-score-item {
+  position: relative; padding: 8px 0 8px 14px; margin-bottom: 4px;
+}
+.ra-score-item::before {
+  content: ''; position: absolute; left: 0; top: 8px; bottom: 8px;
+  width: 4px; border-radius: 2px; background: var(--pt, var(--accent));
+}
+.ra-score-item-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 3px;
+}
+.ra-score-item-head b { color: var(--light-h); font-weight: 600; font-size: 13.5px; }
+.ra-score-item-head span { color: #7A7A84; font-size: 11.5px; }
+.ra-score-item p { margin: 0; font-size: 12.5px; line-height: 1.6; color: #3A3A42; }
+
+/* 고득점 팁 */
+.ra-tip-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.ra-tip-list li { display: flex; gap: 10px; margin-bottom: 12px; font-size: 12.5px; line-height: 1.55; color: #3A3A42; }
+.ra-tip-ico { flex: 0 0 auto; font-size: 16px; }
+.ra-tip-list b { color: var(--light-h); font-weight: 600; }
+
+/* 등급 기준 표 */
+.ra-grade-tables { display: flex; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+.ra-grade-block { flex: 1 1 200px; }
+.ra-grade-cap { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; color: var(--accent-deep); margin-bottom: 6px; text-transform: uppercase; }
+.ra-grade-row {
+  display: flex; justify-content: space-between;
+  padding: 4px 0; font-size: 12.5px; color: #3A3A42;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+}
+.ra-grade-row span:last-child { color: #7A7A84; }
 """
 
 
@@ -2423,22 +2513,93 @@ with gr.Blocks(title="RespondAI") as app:
 
 <!-- Modals (S1 only) -->
 <div class="ra-modal" id="ra-modal-howto" onclick="if(event.target===this) window.respondAIModal.close()">
-  <div class="ra-modal-card" role="dialog" aria-labelledby="ra-modal-howto-title">
+  <div class="ra-modal-card ra-howto-card" role="dialog" aria-labelledby="ra-modal-howto-title">
     <div class="ra-modal-head">
       <span class="ra-modal-eyebrow">● HOW TO PLAY</span>
       <button type="button" class="ra-modal-close" onclick="window.respondAIModal.close()" aria-label="Close">×</button>
     </div>
     <h2 id="ra-modal-howto-title" class="ra-modal-title">How to play</h2>
+
+    <div class="ra-howto-tabs">
+      <button type="button" class="ra-howto-tab active" data-tab="play" onclick="window.respondAIModal.howtoTab('play', this)">🎮 게임 방식</button>
+      <button type="button" class="ra-howto-tab" data-tab="score" onclick="window.respondAIModal.howtoTab('score', this)">🎵 점수 기준</button>
+      <button type="button" class="ra-howto-tab" data-tab="tips" onclick="window.respondAIModal.howtoTab('tips', this)">⭐ 고득점 팁</button>
+    </div>
+
     <div class="ra-modal-body">
-      <p>RespondAI는 AI와 번갈아 짧은 멜로디를 주고받는 즉흥 연주 세션 게임입니다.</p>
-      <ol class="ra-modal-list">
-        <li><b>세션 시작</b> — “Start session” 버튼을 누르면 무작위로 조성(Key)과 BPM이 정해집니다.</li>
-        <li><b>나의 차례</b> — 화면 가상 건반을 마우스로 누르거나, 키보드 <kbd>A S D F G H J K L</kbd> (흰 건반), <kbd>W E R T Y U I O</kbd> (검은 건반)으로 노트를 입력합니다. <kbd>Backspace</kbd>로 마지막 노트 취소, <kbd>Enter</kbd>로 확정합니다.</li>
-        <li><b>AI 응답</b> — 내 멜로디를 듣고 AI가 응답을 생성·연주합니다.</li>
-        <li><b>교환 반복</b> — 한 라운드당 3번 주고받습니다. 라운드가 끝나면 조성 일관성·리듬 유사도·모티프 활용·창의성 보너스 4가지 기준으로 점수가 계산됩니다.</li>
-        <li><b>최종 결과</b> — 모든 라운드가 끝나면 누적 점수와 등급(S/A/B/C)이 나옵니다. 1라운드 첫 멜로디를 마지막 라운드에서 다시 사용하면 모티프 보너스 +150점이 추가됩니다.</li>
-      </ol>
-      <p class="ra-modal-foot">팁: 너무 길게 연주하지 마세요. 짧고 분명한 모티프가 좋은 응답을 만듭니다.</p>
+      <!-- PART 1 -->
+      <div class="ra-howto-pane active" data-pane="play">
+        <h3 class="ra-howto-h">어떻게 진행되나요?</h3>
+        <ul class="ra-modal-list ra-modal-list-bullets">
+          <li>총 5라운드, 라운드마다 AI와 멜로디를 주고받습니다.</li>
+          <li>매 라운드는 3번의 교환으로 이루어집니다.<br/><span class="ra-howto-dim">→ 내가 먼저 연주 → AI가 응답 → 내가 다시 연주 (×3)</span></li>
+          <li>가상 피아노 건반을 클릭하거나 키보드 단축키로 음을 입력하세요.</li>
+          <li>입력을 마치면 <b>[확정]</b> 버튼 또는 <kbd>Enter</kbd>를 누르세요.</li>
+          <li>최대 16개의 음을 입력할 수 있고, 최소 제한은 없습니다.</li>
+          <li>마지막으로 입력한 음은 <kbd>Backspace</kbd>로 취소할 수 있습니다.</li>
+        </ul>
+        <div class="ra-key-table">
+          <div class="ra-key-row"><span class="ra-key-label">흰 건반</span><span><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd><kbd>J</kbd><kbd>K</kbd> → C D E F G A B C</span></div>
+          <div class="ra-key-row"><span class="ra-key-label">검은 건반</span><span><kbd>W</kbd><kbd>E</kbd><kbd>R</kbd><kbd>T</kbd><kbd>Y</kbd> → C# D# F# G# A#</span></div>
+          <div class="ra-key-row"><span class="ra-key-label">옥타브 ↑</span><span><kbd>Shift</kbd> + <kbd>↑</kbd></span></div>
+          <div class="ra-key-row"><span class="ra-key-label">옥타브 ↓</span><span><kbd>Shift</kbd> + <kbd>↓</kbd></span></div>
+          <div class="ra-key-row"><span class="ra-key-label">마지막 음 취소</span><span><kbd>Backspace</kbd></span></div>
+          <div class="ra-key-row"><span class="ra-key-label">확정</span><span><kbd>Enter</kbd></span></div>
+        </div>
+      </div>
+
+      <!-- PART 2 -->
+      <div class="ra-howto-pane" data-pane="score">
+        <h3 class="ra-howto-h">무엇으로 점수를 받나요?</h3>
+        <p class="ra-howto-sub">교환마다 최대 1000점. 아래 4가지 기준으로 평가합니다.</p>
+        <div class="ra-score-item" style="--pt:#7B9FD4;">
+          <div class="ra-score-item-head"><b>① 조성 일관성</b><span>최대 300점</span></div>
+          <p>라운드마다 조성(Key)이 정해집니다. 그 조성의 스케일 안에 있는 음을 많이 쓸수록 높은 점수를 받습니다.<br/><span class="ra-howto-dim">예: D minor 라운드에서 D minor 스케일 음을 80% 쓰면 → 240점</span></p>
+        </div>
+        <div class="ra-score-item" style="--pt:#6FBF8F;">
+          <div class="ra-score-item-head"><b>② 리듬 호응</b><span>최대 300점</span></div>
+          <p>AI가 응답한 리듬 패턴을 얼마나 따라갔는지 평가합니다. 완전히 같을 필요는 없지만, 박자감이 비슷할수록 유리합니다.<br/><span class="ra-howto-dim">(첫 번째 교환은 AI 응답이 없으므로 자동 만점 처리)</span></p>
+        </div>
+        <div class="ra-score-item" style="--pt:#9B8FD4;">
+          <div class="ra-score-item-head"><b>③ 모티프 활용</b><span>최대 300점</span></div>
+          <p>1라운드 첫 번째 교환에서 내가 입력한 멜로디가 게임 전체의 ‘기준 모티프’가 됩니다. 이후 교환에서 그 멜로디의 앞부분(첫 3~4음)이 다시 등장할수록 점수를 받습니다.<br/><span class="ra-howto-dim">(1라운드 첫 교환은 자동 만점)</span></p>
+        </div>
+        <div class="ra-score-item" style="--pt:#E8C26A;">
+          <div class="ra-score-item-head"><b>④ 창의성 보너스</b><span>최대 100점</span></div>
+          <p>AI의 응답을 그대로 따라하지 않으면 +50점. 음정이나 리듬에 변형을 주면 추가 +50점.</p>
+        </div>
+        <div class="ra-score-item" style="--pt:#E89A6A;">
+          <div class="ra-score-item-head"><b>⑤ R5 모티프 보너스</b><span>최대 150점 · 5라운드 한정</span></div>
+          <p>마지막 라운드에서 기준 모티프를 50% 이상 활용하면 +150점 보너스!</p>
+        </div>
+      </div>
+
+      <!-- PART 3 -->
+      <div class="ra-howto-pane" data-pane="tips">
+        <h3 class="ra-howto-h">잘 하려면 어떻게 해야 하나요?</h3>
+        <ul class="ra-tip-list">
+          <li><span class="ra-tip-ico">🎼</span><span><b>라운드 시작 전 Key를 확인하세요.</b><br/>"Key: D minor" 라면 레·미♭·파·솔·라·시♭·도 안에서 연주하면 유리합니다.</span></li>
+          <li><span class="ra-tip-ico">🔁</span><span><b>1라운드 첫 연주가 가장 중요합니다.</b><br/>이 멜로디가 게임 전체의 기준이 됩니다. 기억하기 쉬운 짧은 패턴을 만들어보세요.</span></li>
+          <li><span class="ra-tip-ico">👂</span><span><b>AI의 리듬을 잘 들어보세요.</b><br/>AI가 응답한 뒤, 그 박자감을 다음 입력에 반영하면 리듬 호응 점수가 올라갑니다.</span></li>
+          <li><span class="ra-tip-ico">🎹</span><span><b>마지막 라운드에서 첫 멜로디로 돌아오세요.</b><br/>R5에서 처음 만든 모티프를 다시 쓰면 +150점 보너스를 받습니다.</span></li>
+        </ul>
+        <div class="ra-grade-tables">
+          <div class="ra-grade-block">
+            <div class="ra-grade-cap">라운드 등급</div>
+            <div class="ra-grade-row"><span>⭐⭐⭐ PERFECT</span><span>950+</span></div>
+            <div class="ra-grade-row"><span>⭐⭐ GREAT</span><span>800+</span></div>
+            <div class="ra-grade-row"><span>⭐ CLEAR</span><span>600+</span></div>
+            <div class="ra-grade-row"><span>TRY AGAIN</span><span>&lt; 600</span></div>
+          </div>
+          <div class="ra-grade-block">
+            <div class="ra-grade-cap">최종 등급 (5000점 만점)</div>
+            <div class="ra-grade-row"><span>S</span><span>4500+</span></div>
+            <div class="ra-grade-row"><span>A</span><span>3500+</span></div>
+            <div class="ra-grade-row"><span>B</span><span>2500+</span></div>
+            <div class="ra-grade-row"><span>C</span><span>&lt; 2500</span></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
