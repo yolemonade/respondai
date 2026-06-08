@@ -216,10 +216,10 @@ def init_state() -> dict:
 
 
 def round_grade(score: int) -> str:
-    if score >= 950: return "⭐⭐⭐ PERFECT"
-    if score >= 800: return "⭐⭐ GREAT"
-    if score >= 600: return "⭐ CLEAR"
-    return "TRY AGAIN"
+    if score >= 950: return "⭐⭐⭐ Perfect!"
+    if score >= 800: return "⭐⭐ Well played!"
+    if score >= 600: return "⭐ Nicely done!"
+    return "A little short — keep going!"
 
 
 # ─── Scoring ─────────────────────────────────────────────────────────────────
@@ -792,7 +792,69 @@ KEYBOARD_JS = """() => {
     if (btn && !btn.disabled) btn.click();
   }
 
-  window.respondAI = { sendNote, flashKey };
+  /* ─── UI 효과음 (Web Audio) ─── */
+  function playBell(freq, t0, dur, peak, type) {
+    const ctx = ensureAudioCtx();
+    if (!ctx || !masterGain) return;
+    const osc = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'sine';
+    osc2.type = 'sine';
+    osc.frequency.value = freq;
+    osc2.frequency.value = freq * 2;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(peak, t0 + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain); osc2.connect(gain); gain.connect(masterGain);
+    osc.start(t0); osc2.start(t0);
+    osc.stop(t0 + dur + 0.05); osc2.stop(t0 + dur + 0.05);
+  }
+
+  // 버튼 효과음 — 짧고 예쁜 "띵" (밝은 벨 한 음)
+  function chime() {
+    try {
+      const ctx = ensureAudioCtx();
+      const t0 = ctx.currentTime + 0.01;
+      playBell(1318.5, t0, 0.45, 0.5, 'triangle');   // E6
+    } catch (_) {}
+  }
+
+  // 라운드 결과 멜로디 — 'success'(신나는 상승) / 'fail'(짧은 하강 "뚜루루")
+  function resultCue(kind) {
+    try {
+      const ctx = ensureAudioCtx();
+      const t0 = ctx.currentTime + 0.04;
+      if (kind === 'fail') {
+        const seq = [392.00, 349.23, 311.13, 261.63];   // G4 F4 D#4 C4 (하강)
+        seq.forEach((f, i) => playBell(f, t0 + i * 0.16, 0.34, 0.38, 'triangle'));
+      } else {
+        const seq = [523.25, 659.25, 783.99, 1046.50];  // C5 E5 G5 C6 (상승 아르페지오)
+        seq.forEach((f, i) => playBell(f, t0 + i * 0.13, 0.40, 0.46, 'triangle'));
+      }
+    } catch (_) {}
+  }
+
+  window.respondAI = { sendNote, flashKey, chime, resultCue };
+
+  // S4 결과 카드의 data-cue 를 읽어 성공/실패 멜로디 1회 재생 (화면 전환 JS에서 호출)
+  window.raPlayResultCue = function() {
+    try {
+      const roots = [document];
+      document.querySelectorAll('gradio-app, .gradio-container').forEach((h) => {
+        if (h.shadowRoot) roots.push(h.shadowRoot);
+      });
+      for (const root of roots) {
+        const panel = root.querySelector('.game-panel.panel-s4:not(.hide)');
+        if (!panel) continue;
+        const card = panel.querySelector('.ra-result-card[data-cue]:not([data-cue-done])');
+        if (card) {
+          card.setAttribute('data-cue-done', '1');
+          window.respondAI && window.respondAI.resultCue && window.respondAI.resultCue(card.getAttribute('data-cue'));
+        }
+      }
+    } catch (_) {}
+  };
 
   // Simple modal controller for S1 nav popups (lives globally so onclick attrs work)
   if (!window.respondAIModal) {
@@ -963,7 +1025,11 @@ SHOW_SCREEN_JS = """(screenId) => {
       else el.classList.add('hide');
     });
   }
+  window.raPlayResultCue && window.raPlayResultCue();
 }"""
+
+# 버튼 클릭 효과음 ("띵")
+CHIME_JS = """() => { try { window.respondAI && window.respondAI.chime && window.respondAI.chime(); } catch (_) {} }"""
 
 
 # ─── Piano keyboard HTML (pure HTML/CSS, NO <script> — onclick calls window.respondAI) ──
@@ -1100,8 +1166,9 @@ def s4_html(state: dict) -> str:
         r5_bonus = '<div class="ra-r5-bonus">● R5 motif bonus &nbsp;+150</div>'
 
     feedback = exs[-1].get("feedback", "")
+    cue = "success" if round_total >= 600 else "fail"
     return f"""
-<div class="ra-result-card">
+<div class="ra-result-card" data-cue="{cue}">
   <div class="ra-round-label">Round {rr['round_num']} Result</div>
   <div class="ra-result-grade">{grade}</div>
   <div class="ra-result-total">{round_total} / 1000</div>
@@ -2165,7 +2232,7 @@ button.pill-cta.pill-cta-primary:hover {
 .ra-modal-body {
   font-size: 13.5px;
   line-height: 1.65;
-  color: var(--light-body);
+  color: #2E2E36;
 }
 .ra-modal-body p { margin: 0 0 12px; }
 .ra-modal-body b { color: var(--light-h); font-weight: 500; }
@@ -2200,7 +2267,7 @@ button.pill-cta.pill-cta-primary:hover {
 .ra-modal-foot {
   margin-top: 14px;
   font-size: 12px;
-  color: var(--light-sub);
+  color: #565660;
   font-style: normal;
 }
 .ra-modal-locked { overflow: hidden !important; }
@@ -2505,7 +2572,7 @@ with gr.Blocks(title="RespondAI") as app:
     btn_piano_start.click(
         on_piano_start, inputs=[state],
         outputs=[state, s2_info, screen_nav],
-    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav]).then(fn=None, js=CHIME_JS)
 
     def on_humming_start(st):
         st = init_state()
@@ -2517,7 +2584,7 @@ with gr.Blocks(title="RespondAI") as app:
     btn_humming_start.click(
         on_humming_start, inputs=[state],
         outputs=[state, s2_info, screen_nav],
-    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav]).then(fn=None, js=CHIME_JS)
 
     # S2 → S3 — 상태·S3 UI·화면 전환을 한 번에 (분리 시 Gradio 6 하얀 화면)
     def on_round_start(st):
@@ -2561,6 +2628,7 @@ with gr.Blocks(title="RespondAI") as app:
     )
     round_start_chain.then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
     round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
+    round_start_chain.then(fn=None, js=CHIME_JS)
 
     def on_note_event(midi: int, st: dict):
         """건반 입력 — 노트 목록 + 피아노롤(미확정 노트 반투명)."""
@@ -2840,6 +2908,7 @@ with gr.Blocks(title="RespondAI") as app:
       if (phase) window._raPhase = String(phase).trim();
       const ae = document.activeElement;
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+      window.raPlayResultCue && window.raPlayResultCue();
     }"""
 
     confirm_chain = btn_confirm.click(
