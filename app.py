@@ -29,7 +29,8 @@ import gradio as gr
 from concurrent.futures import ThreadPoolExecutor
 from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
-from input.piano import synth_notes
+from input.piano import synth_notes, mock_ai_response
+from input.humming import humming_to_notes
 from inference.generate import load_model_for_inference, generate
 #from inference.decode import notes_to_wav
 
@@ -38,7 +39,7 @@ from inference.generate import load_model_for_inference, generate
 MAX_EXCHANGES  = 3
 MAX_NOTES      = 16
 DEFAULT_DURATION = 2   # sixteenth-note steps per note slot
-TOTAL_ROUNDS   = 2  # TODO: 테스트용 임시값, 발표 전 5로 복원
+TOTAL_ROUNDS   = 2  # 테스트용 (발표 전 5로 복원) — MAX_EXCHANGES=3 고정
 AI_MODE        = "model"
 
 CHECKPOINT_PATH = "checkpoints/best_inference.pt"
@@ -166,6 +167,34 @@ _MODEL, _TOKENIZER, _DEVICE = load_model_for_inference(CHECKPOINT_PATH)
 print(f"[RespondAI] Model ready on {_DEVICE} ({sum(p.numel() for p in _MODEL.parameters()):,} params)")
 
 
+def generate_ai_notes(user_notes: List[Note], key_token: str, bpm: int):
+    """AI 응답 생성 — 모델이 빈 응답(즉시 EOS)을 내면 재시도 후 폴백.
+
+    모델은 짧은 입력에서 즉시 EOS 를 자주 내보내 response_notes 가 비고,
+    그 경우 피아노롤에 AI(빨강) 노트가 그려지지 않는다. 항상 보이도록:
+      1) 1차 생성 → 비면 온도 낮춰 1회 재시도
+      2) 그래도 비면 유저 멜로디 옥타브 변형(mock)으로 폴백
+    Returns (ai_notes, result)  — result 는 마지막 generate 결과(attn 용).
+    """
+    max_bars, max_new_tokens = generation_limits(user_notes)
+    result = None
+    for temp in (0.95, 0.8):
+        result = generate(
+            _MODEL, _TOKENIZER, user_notes,
+            key=key_token, tempo=bpm,
+            max_bars=max_bars, max_new_tokens=max_new_tokens,
+            temperature=temp, return_attention=False,
+        )
+        ai_notes = fit_ai_response_to_user(result.response_notes, user_notes, bpm)
+        if ai_notes:
+            return ai_notes, result
+
+    # 폴백: 유저 입력 옥타브 변형(항상 비어있지 않음) → 입력 없으면 빈 채로 반환
+    fallback = mock_ai_response(user_notes) if user_notes else []
+    ai_notes = fit_ai_response_to_user(fallback, user_notes, bpm) or fallback
+    return ai_notes, result
+
+
 # ─── State helpers ───────────────────────────────────────────────────────────
 
 def init_state() -> dict:
@@ -187,10 +216,10 @@ def init_state() -> dict:
 
 
 def round_grade(score: int) -> str:
-    if score >= 950: return "⭐⭐⭐ PERFECT"
-    if score >= 800: return "⭐⭐ GREAT"
-    if score >= 600: return "⭐ CLEAR"
-    return "TRY AGAIN"
+    if score >= 950: return "⭐⭐⭐ Perfect!"
+    if score >= 800: return "⭐⭐ Well played!"
+    if score >= 600: return "⭐ Nicely done!"
+    return "A little short — keep going!"
 
 
 # ─── Scoring ─────────────────────────────────────────────────────────────────
@@ -233,19 +262,31 @@ def compute_exchange_score(
         rhythm_score = tmp["rhythm_similarity"]
         rhythm_raw = tmp["raw"]["rhythm_pearson"]
 
-    # Key consistency and creativity: use ai_prev (or empty placeholder)
+    # Key consistency: always computable
     base = score_response(ai_prev_notes or user_notes, user_notes, key_token)
     key_score = base["key_consistency"]
-    creativity = base["creativity_bonus"]
+
+    # Creativity: comparing user vs AI-prev; auto-award if no AI response yet
+    if not ai_prev_notes or exchange_num == 1:
+        creativity = 50
+    else:
+        creativity = base["creativity_bonus"]
 
     # Motif: compare against r1_motif (or ai_prev if no motif yet)
-    if r1_motif:
+    # r1_motif needs ≥3 notes to form n-grams (n=3 → 2 intervals); auto-300 if too short
+    if r1_motif and len(r1_motif) >= 3:
         motif_res = score_response(r1_motif, user_notes, key_token)
         motif_score = motif_res["motif_usage"]
         motif_raw = motif_res["raw"]["motif_overlap"]
+    elif r1_motif and len(r1_motif) < 3:
+        # Motif too short to score — award full to avoid penalising player unfairly
+        motif_score = 300
+        motif_raw = 1.0
     else:
         motif_score = base["motif_usage"]
         motif_raw = base["raw"]["motif_overlap"]
+
+    print(f"[SCORE] R{round_num}/E{exchange_num} | key={key_score} rhythm={rhythm_score} motif={motif_score} creativity={creativity} | r1_motif_len={len(r1_motif)} user_len={len(user_notes)} ai_prev_len={len(ai_prev_notes)} | motif_raw={motif_raw:.3f}")
 
     total = key_score + rhythm_score + motif_score + creativity
 
@@ -671,6 +712,22 @@ KEYBOARD_JS = """() => {
     return !!(r && r.width > 0 && r.height > 0);
   }
 
+  // 건반 입력(소리 포함)은 오직 실제 라운드의 피아노 입력 중에만 허용:
+  // S3 화면 + 피아노 모드(화면 피아노가 보임) + AI 응답 중이 아님.
+  // → 메인/점수/허밍 화면에서는 키보드를 눌러도 건반 소리가 나지 않음.
+  function isGameInputActive() {
+    if (isInputLocked()) return false;
+    const roots = [document];
+    document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
+      if (h.shadowRoot) roots.push(h.shadowRoot);
+    });
+    for (const root of roots) {
+      const host = root.querySelector('#s3-piano-host');
+      if (host && isVisible(host)) return true;
+    }
+    return false;
+  }
+
   function gradioBtn(id) {
     const roots = [document];
     document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
@@ -762,8 +819,116 @@ KEYBOARD_JS = """() => {
     const btn = gradioBtn('btn-confirm');
     if (btn && !btn.disabled) btn.click();
   }
+  window.raClickConfirm = clickConfirm;
 
-  window.respondAI = { sendNote, flashKey };
+  // ── 허밍 모드 헬퍼 ─────────────────────────────────────────────────────
+  // S3 마이크 호스트가 보이면 허밍 모드(녹음 입력) 상태.
+  function hummingMicHost() {
+    const roots = [document];
+    document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
+      if (h.shadowRoot) roots.push(h.shadowRoot);
+    });
+    for (const root of roots) {
+      const host = root.querySelector('#s3-mic-host');
+      if (host && isVisible(host)) return host;
+    }
+    return null;
+  }
+  // gr.Audio 의 "정지(Stop)" 버튼 — 녹음 중일 때만 존재(aria-label) 한다.
+  function micStopButton() {
+    const host = hummingMicHost();
+    if (!host) return null;
+    return host.querySelector('button[aria-label="Stop recording"]')
+        || host.querySelector('button[aria-label*="Stop"]')
+        || host.querySelector('.stop-button, button.stop-button')
+        || null;
+  }
+  function isMicRecording() {
+    return !!window.raIsRecording || !!micStopButton();
+  }
+  // Enter(허밍): 녹음 중이면 정지→인식→자동 전송, 정지 상태면 바로 전송.
+  window.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' || e.repeat) return;
+    if (!hummingMicHost()) return;           // 허밍 S3 화면이 아닐 때는 무시
+    if (isInputLocked()) return;             // AI 응답 중에는 무시
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (isMicRecording()) {
+      const stop = micStopButton();
+      if (stop) {
+        window.raHummingAutoConfirm = true;  // 인식 완료 후 자동 전송 플래그
+        stop.click();                        // → stop_recording → PESTO 인식
+      } else {
+        clickConfirm();
+      }
+    } else {
+      clickConfirm();                        // 이미 정지 상태 → 바로 전송
+    }
+  }, true);
+
+  /* ─── UI 효과음 (Web Audio) ─── */
+  function playBell(freq, t0, dur, peak, type) {
+    const ctx = ensureAudioCtx();
+    if (!ctx || !masterGain) return;
+    const osc = ctx.createOscillator();
+    const osc2 = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = type || 'sine';
+    osc2.type = 'sine';
+    osc.frequency.value = freq;
+    osc2.frequency.value = freq * 2;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(peak, t0 + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    osc.connect(gain); osc2.connect(gain); gain.connect(masterGain);
+    osc.start(t0); osc2.start(t0);
+    osc.stop(t0 + dur + 0.05); osc2.stop(t0 + dur + 0.05);
+  }
+
+  // 버튼 효과음 — 짧고 예쁜 "띵" (밝은 벨 한 음)
+  function chime() {
+    try {
+      const ctx = ensureAudioCtx();
+      const t0 = ctx.currentTime + 0.01;
+      playBell(1318.5, t0, 0.45, 0.5, 'triangle');   // E6
+    } catch (_) {}
+  }
+
+  // 라운드 결과 멜로디 — 'success'(신나는 상승) / 'fail'(짧은 하강 "뚜루루")
+  function resultCue(kind) {
+    try {
+      const ctx = ensureAudioCtx();
+      const t0 = ctx.currentTime + 0.04;
+      if (kind === 'fail') {
+        const seq = [392.00, 349.23, 311.13, 261.63];   // G4 F4 D#4 C4 (하강)
+        seq.forEach((f, i) => playBell(f, t0 + i * 0.16, 0.34, 0.38, 'triangle'));
+      } else {
+        const seq = [523.25, 659.25, 783.99, 1046.50];  // C5 E5 G5 C6 (상승 아르페지오)
+        seq.forEach((f, i) => playBell(f, t0 + i * 0.13, 0.40, 0.46, 'triangle'));
+      }
+    } catch (_) {}
+  }
+
+  window.respondAI = { sendNote, flashKey, chime, resultCue };
+
+  // S4 결과 카드의 data-cue 를 읽어 성공/실패 멜로디 1회 재생 (화면 전환 JS에서 호출)
+  window.raPlayResultCue = function() {
+    try {
+      const roots = [document];
+      document.querySelectorAll('gradio-app, .gradio-container').forEach((h) => {
+        if (h.shadowRoot) roots.push(h.shadowRoot);
+      });
+      for (const root of roots) {
+        const panel = root.querySelector('.game-panel.panel-s4:not(.hide)');
+        if (!panel) continue;
+        const card = panel.querySelector('.ra-result-card[data-cue]:not([data-cue-done])');
+        if (card) {
+          card.setAttribute('data-cue-done', '1');
+          window.respondAI && window.respondAI.resultCue && window.respondAI.resultCue(card.getAttribute('data-cue'));
+        }
+      }
+    } catch (_) {}
+  };
 
   // Simple modal controller for S1 nav popups (lives globally so onclick attrs work)
   if (!window.respondAIModal) {
@@ -778,6 +943,12 @@ KEYBOARD_JS = """() => {
         document.querySelectorAll('.ra-modal.open').forEach(m => m.classList.remove('open'));
         document.documentElement.classList.remove('ra-modal-locked');
       },
+      howtoTab(name, btn) {
+        const card = btn.closest('.ra-modal-card');
+        if (!card) return;
+        card.querySelectorAll('.ra-howto-tab').forEach(t => t.classList.toggle('active', t === btn));
+        card.querySelectorAll('.ra-howto-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === name));
+      },
     };
     window.addEventListener('keydown', function(e) {
       if (e.key === 'Escape' && document.querySelector('.ra-modal.open')) {
@@ -791,7 +962,7 @@ KEYBOARD_JS = """() => {
   window.addEventListener('touchstart', unlockAudio, { capture: true });
 
   document.addEventListener('mousedown', function(e) {
-    if (isInputLocked()) return;
+    if (!isGameInputActive()) return;
     const key = e.target.closest && e.target.closest('[data-midi]');
     if (!key || !key.dataset.midi) return;
       e.preventDefault();
@@ -804,9 +975,19 @@ KEYBOARD_JS = """() => {
     return midiFromEvent(e) !== null;
   }
 
+  // 옥타브 이동: Shift + ↑ / ↓ (입력 잠금 중이 아닐 때)
+  window.addEventListener('keydown', function(e) {
+    if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    if (!isGameInputActive()) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    if (e.key === 'ArrowUp')   baseOctave = Math.min(6, baseOctave + 1);
+    if (e.key === 'ArrowDown') baseOctave = Math.max(2, baseOctave - 1);
+  }, true);
+
   window.addEventListener('keydown', function(e) {
     if (!isGameKey(e)) return;
-    if (isInputLocked()) return;
+    if (!isGameInputActive()) return;
     if (e.repeat) return;
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -916,6 +1097,18 @@ FOCUS_GAME_JS = """() => {
   if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
 }"""
 
+# 허밍 녹음 시작 — JS 플래그만 세팅 (서버 왕복 없음)
+MIC_START_JS = """() => { window.raIsRecording = true; }"""
+
+# 허밍 인식(stop_recording) 완료 후 — Enter 로 정지했으면 자동 전송
+MIC_AFTER_STOP_JS = """() => {
+  window.raIsRecording = false;
+  if (window.raHummingAutoConfirm) {
+    window.raHummingAutoConfirm = false;
+    if (window.raClickConfirm) window.raClickConfirm();
+  }
+}"""
+
 UNLOCK_INPUT_JS = """(phase) => {
   if (phase) window._raPhase = String(phase).trim();
 }"""
@@ -934,7 +1127,11 @@ SHOW_SCREEN_JS = """(screenId) => {
       else el.classList.add('hide');
     });
   }
+  window.raPlayResultCue && window.raPlayResultCue();
 }"""
+
+# 버튼 클릭 효과음 ("띵")
+CHIME_JS = """() => { try { window.respondAI && window.respondAI.chime && window.respondAI.chime(); } catch (_) {} }"""
 
 
 # ─── Piano keyboard HTML (pure HTML/CSS, NO <script> — onclick calls window.respondAI) ──
@@ -1071,8 +1268,9 @@ def s4_html(state: dict) -> str:
         r5_bonus = '<div class="ra-r5-bonus">● R5 motif bonus &nbsp;+150</div>'
 
     feedback = exs[-1].get("feedback", "")
+    cue = "success" if round_total >= 600 else "fail"
     return f"""
-<div class="ra-result-card">
+<div class="ra-result-card" data-cue="{cue}">
   <div class="ra-round-label">Round {rr['round_num']} Result</div>
   <div class="ra-result-grade">{grade}</div>
   <div class="ra-result-total">{round_total} / 1000</div>
@@ -1120,14 +1318,79 @@ def s5_html(state: dict) -> str:
             f'</div>'
         )
 
+    # ── 좌측: 라운드별 결과 행 ────────────────────────────────────────────────
+    def _stars(score: int) -> str:
+        if score >= 950: return "⭐⭐⭐"
+        if score >= 800: return "⭐⭐"
+        if score >= 600: return "⭐"
+        return "—"
+
+    round_rows = ""
+    for rr in round_results:
+        rn = rr["round_num"]
+        cond = ROUND_CONDITIONS.get(rn, "")
+        round_rows += (
+            f'<div class="s5-round-row">'
+            f'<span class="s5-round-rn">R{rn}</span>'
+            f'<span class="s5-round-cond">{cond}</span>'
+            f'<span class="s5-round-stars">{_stars(rr["total"])}</span>'
+            f'<span class="s5-round-score">{rr["total"]}</span>'
+            f'</div>'
+        )
+
+    # ── 우측: 3개 항목 평균 게이지 ────────────────────────────────────────────
+    all_ex = [e for rr in round_results for e in rr["exchange_scores"]]
+    n_ex = max(1, len(all_ex))
+
+    def _avg(metric: str) -> float:
+        return sum(e[metric] for e in all_ex) / n_ex
+
+    def _gauge(icon, label, desc, value, color, hint):
+        pct = min(100, int(value / 300 * 100))
+        hint_html = (
+            f'<div class="s5-gauge-hint">💡 {hint}</div>' if pct < 50 and hint else ""
+        )
+        return (
+            f'<div class="s5-gauge">'
+            f'<div class="s5-gauge-head"><span>{icon} {label}</span><span>{pct}%</span></div>'
+            f'<div class="s5-gauge-desc">{desc}</div>'
+            f'<div class="s5-gauge-track"><div class="s5-gauge-fill" style="width:{pct}%;background:{color};"></div></div>'
+            f'{hint_html}'
+            f'</div>'
+        )
+
+    gauges = (
+        _gauge("🎵", "조성 일관성", "라운드의 Key 스케일 안에서 연주한 비율",
+               _avg("key_consistency"), "#7B9FD4",
+               "다음엔 Key 스케일 안의 음 위주로 연주해보세요")
+        + _gauge("🥁", "리듬 호응", "AI의 리듬 패턴에 얼마나 맞춰 응답했는가",
+                 _avg("rhythm_similarity"), "#6FBF8F",
+                 "AI 응답의 박자감을 다음 입력에 반영해보세요")
+        + _gauge("🔁", "모티프 활용", "첫 라운드 멜로디를 얼마나 기억하고 활용했는가",
+                 _avg("motif_usage"), "#9B8FD4",
+                 "1라운드 첫 멜로디를 다시 사용해보세요")
+    )
+
+    flavor = '<div class="s5-flavor">당신의 연주 세션이 끝났습니다.</div>'
+
     return f"""
-<div class="s5-stage">
-  <div class="s5-label">● SESSION COMPLETE</div>
-  <div class="s5-headline">See what technology<br/>can do for music.</div>
+<div class="s5-stage s5-stage-v2">
+  <div class="s5-label">● FINAL RESULT</div>
   <div class="s5-grade" style="color:{gc};">{grade}</div>
   <div class="s5-total">{final_total} <span class="s5-of">/ 5000</span></div>
+  {flavor}
   {bonus_detail}
-  <div class="s5-halfsphere"></div>
+  <div class="s5-cols">
+    <div class="s5-col s5-col-rounds">
+      <div class="s5-col-cap">라운드별 결과</div>
+      {round_rows}
+    </div>
+    <div class="s5-col s5-col-metrics">
+      <div class="s5-col-cap">항목별 분석 · 5라운드 평균</div>
+      {gauges}
+    </div>
+  </div>
+  <div class="s5-roll-cap">● 세션 전체 피아노롤 · <span style="color:#7B9FD4;">파랑 You</span> / <span style="color:#FF4A6E;">빨강 AI</span></div>
 </div>
 """
 
@@ -1842,7 +2105,7 @@ button.pill-cta.pill-cta-primary:hover {
 .s5-roll-hidden { display: none !important; }
 .s5-body {
   position: relative !important;
-  overflow: hidden !important;
+  overflow-y: auto !important;
   padding: 0 !important;
 }
 .s5-stage {
@@ -1905,6 +2168,54 @@ button.pill-cta.pill-cta-primary:hover {
   z-index: 0;
 }
 .s5-stage > * { position: relative; z-index: 1; }
+
+/* S5 v2 — 정보형 결과 레이아웃 */
+.s5-stage-v2 { padding: 2px 34px 18px; justify-content: flex-start; }
+.s5-stage-v2 .s5-grade { margin-top: 12px; font-size: 72px; }
+.s5-stage-v2 .s5-total { margin-top: 6px; font-size: 24px; }
+.s5-flavor { margin-top: 8px; font-size: 13px; color: var(--accent); letter-spacing: 0.3px; }
+.s5-cols {
+  display: flex; gap: 22px; width: 100%;
+  max-width: 760px; margin: 22px auto 6px;
+  text-align: left; flex-wrap: wrap;
+}
+.s5-col { flex: 1 1 320px; min-width: 260px; }
+.s5-col-cap {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 1.4px;
+  text-transform: uppercase; color: var(--accent);
+  margin-bottom: 10px;
+}
+.s5-round-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,0.08);
+  font-size: 12.5px; color: #E8E6F0;
+}
+.s5-round-rn { flex: 0 0 28px; font-weight: 600; color: var(--accent); }
+.s5-round-cond {
+  flex: 1 1 auto; color: #B8B4C8; font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.s5-round-stars { flex: 0 0 auto; font-size: 11px; letter-spacing: -1px; }
+.s5-round-score { flex: 0 0 48px; text-align: right; font-weight: 600; color: #F0EEFA; }
+.s5-gauge { margin-bottom: 14px; }
+.s5-gauge-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12.5px; font-weight: 500; color: #ECEAF4;
+}
+.s5-gauge-desc { font-size: 11px; color: #9D99AE; margin: 2px 0 5px; }
+.s5-gauge-track {
+  height: 6px; border-radius: 3px;
+  background: rgba(255,255,255,0.1); overflow: hidden;
+}
+.s5-gauge-fill { height: 6px; border-radius: 3px; transition: width 0.6s ease; }
+.s5-gauge-hint { font-size: 10.5px; color: #E8C26A; margin-top: 4px; }
+.s5-roll-cap {
+  width: 100%; max-width: 760px; margin: 14px auto 0;
+  text-align: left; font-size: 10.5px; letter-spacing: 0.6px;
+  color: #9D99AE;
+}
+.s5-roll-host { display: block !important; margin: 6px auto 0; max-width: 820px; width: 100%; }
+
 .s5-actions {
   position: relative !important;
   z-index: 3 !important;
@@ -2100,11 +2411,11 @@ button.pill-cta.pill-cta-primary:hover {
 }
 .ra-modal-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 12px;
 }
 .ra-modal-eyebrow {
-  font-size: 10px; font-weight: 500;
-  letter-spacing: 2.4px; text-transform: uppercase;
+  font-size: 22px; font-weight: 500;
+  letter-spacing: 0.4px; text-transform: uppercase;
   color: var(--accent);
 }
 .ra-modal-close {
@@ -2126,17 +2437,11 @@ button.pill-cta.pill-cta-primary:hover {
   background: rgba(0,0,0,0.04) !important;
   opacity: 1 !important;
 }
-.ra-modal-title {
-  margin: 4px 0 14px;
-  font-size: 22px;
-  font-weight: 500;
-  letter-spacing: -0.3px;
-  color: var(--light-h);
-}
+.ra-modal-title { display: none; }
 .ra-modal-body {
   font-size: 13.5px;
   line-height: 1.65;
-  color: var(--light-body);
+  color: #2E2E36;
 }
 .ra-modal-body p { margin: 0 0 12px; }
 .ra-modal-body b { color: var(--light-h); font-weight: 500; }
@@ -2171,10 +2476,100 @@ button.pill-cta.pill-cta-primary:hover {
 .ra-modal-foot {
   margin-top: 14px;
   font-size: 12px;
-  color: var(--light-sub);
+  color: #565660;
   font-style: normal;
 }
 .ra-modal-locked { overflow: hidden !important; }
+
+/* How to Play — 탭형 모달 */
+.ra-howto-card { width: min(600px, 100%); }
+.ra-howto-tabs {
+  display: flex; gap: 6px;
+  margin: 2px 0 14px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+}
+.ra-howto-tab {
+  appearance: none; background: transparent; border: none;
+  padding: 8px 12px 10px; margin-bottom: -1px;
+  font-family: inherit; font-size: 13px; font-weight: 500;
+  color: var(--light-sub); cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.ra-howto-tab:hover { color: var(--light-h); }
+.ra-howto-tab.active { color: var(--accent-deep); border-bottom-color: var(--accent); }
+.ra-howto-pane { display: none; animation: ra-modal-fade 0.18s ease-out; }
+.ra-howto-pane.active { display: block; }
+.ra-howto-h { margin: 4px 0 10px; font-size: 15px; font-weight: 600; color: var(--light-h); }
+.ra-howto-sub { margin: 0 0 14px; font-size: 12.5px; color: #565660; }
+.ra-howto-dim { color: #5A5560; font-size: 12.5px; }
+/* Gradio 기본 prose 색이 자식(p/li/span)을 덮어써 연하게 보이는 문제 방지 —
+   모달 본문 전체 글씨를 진하게 강제하고, 의도적으로 연한 보조 텍스트만 예외 처리 */
+.ra-modal-card { background: #FFFFFF !important; }
+.ra-modal-body,
+.ra-modal-body p,
+.ra-modal-body li,
+.ra-modal-body span,
+.ra-modal-body b,
+.ra-modal-body div { color: #2A2A30 !important; }
+/* 의도적으로 연한 보조 텍스트 예외 */
+.ra-modal-body .ra-howto-dim { color: #5A5560 !important; }
+.ra-modal-body .ra-howto-sub { color: #565660 !important; }
+.ra-modal-body .ra-score-item-head span { color: #6A6A72 !important; }
+.ra-modal-body .ra-grade-row span:last-child { color: #6A6A72 !important; }
+.ra-modal-body .ra-grade-cap { color: var(--accent-deep) !important; }
+
+/* 키보드 단축키 표 — 코드블록 스타일 */
+.ra-key-table {
+  margin-top: 14px; padding: 12px 14px;
+  background: #F4F3EF; border: 1px solid rgba(0,0,0,0.07);
+  border-radius: 10px; font-size: 12.5px;
+}
+.ra-key-row { display: flex; align-items: center; gap: 10px; padding: 3px 0; }
+.ra-key-label {
+  flex: 0 0 96px; color: #565660; font-size: 11.5px;
+  letter-spacing: 0.3px;
+}
+.ra-key-row kbd {
+  display: inline-block; background: #FFFFFF;
+  border: 1px solid rgba(0,0,0,0.12); border-bottom-width: 2px;
+  border-radius: 4px; padding: 1px 6px; margin: 0 2px;
+  font-size: 11px; color: #2E2E36; font-family: 'Inter', monospace;
+}
+
+/* 점수 항목 — 좌측 색상 포인트 바 */
+.ra-score-item {
+  position: relative; padding: 8px 0 8px 14px; margin-bottom: 4px;
+}
+.ra-score-item::before {
+  content: ''; position: absolute; left: 0; top: 8px; bottom: 8px;
+  width: 4px; border-radius: 2px; background: var(--pt, var(--accent));
+}
+.ra-score-item-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  margin-bottom: 3px;
+}
+.ra-score-item-head b { color: var(--light-h); font-weight: 600; font-size: 13.5px; }
+.ra-score-item-head span { color: #7A7A84; font-size: 11.5px; }
+.ra-score-item p { margin: 0; font-size: 12.5px; line-height: 1.6; color: #3A3A42; }
+
+/* 고득점 팁 */
+.ra-tip-list { list-style: none; margin: 4px 0 0; padding: 0; }
+.ra-tip-list li { display: flex; gap: 10px; margin-bottom: 12px; font-size: 12.5px; line-height: 1.55; color: #3A3A42; }
+.ra-tip-ico { flex: 0 0 auto; font-size: 16px; }
+.ra-tip-list b { color: var(--light-h); font-weight: 600; }
+
+/* 등급 기준 표 */
+.ra-grade-tables { display: flex; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
+.ra-grade-block { flex: 1 1 200px; }
+.ra-grade-cap { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; color: var(--accent-deep); margin-bottom: 6px; text-transform: uppercase; }
+.ra-grade-row {
+  display: flex; justify-content: space-between;
+  padding: 4px 0; font-size: 12.5px; color: #3A3A42;
+  border-bottom: 1px solid rgba(0,0,0,0.05);
+}
+.ra-grade-row span:last-child { color: #7A7A84; }
 """
 
 
@@ -2327,22 +2722,93 @@ with gr.Blocks(title="RespondAI") as app:
 
 <!-- Modals (S1 only) -->
 <div class="ra-modal" id="ra-modal-howto" onclick="if(event.target===this) window.respondAIModal.close()">
-  <div class="ra-modal-card" role="dialog" aria-labelledby="ra-modal-howto-title">
+  <div class="ra-modal-card ra-howto-card" role="dialog" aria-labelledby="ra-modal-howto-title">
     <div class="ra-modal-head">
       <span class="ra-modal-eyebrow">● HOW TO PLAY</span>
       <button type="button" class="ra-modal-close" onclick="window.respondAIModal.close()" aria-label="Close">×</button>
     </div>
     <h2 id="ra-modal-howto-title" class="ra-modal-title">How to play</h2>
+
+    <div class="ra-howto-tabs">
+      <button type="button" class="ra-howto-tab active" data-tab="play" onclick="window.respondAIModal.howtoTab('play', this)">🎮 게임 방식</button>
+      <button type="button" class="ra-howto-tab" data-tab="score" onclick="window.respondAIModal.howtoTab('score', this)">🎵 점수 기준</button>
+      <button type="button" class="ra-howto-tab" data-tab="tips" onclick="window.respondAIModal.howtoTab('tips', this)">⭐ 고득점 팁</button>
+    </div>
+
     <div class="ra-modal-body">
-      <p>RespondAI는 AI와 번갈아 짧은 멜로디를 주고받는 즉흥 연주 세션 게임입니다.</p>
-      <ol class="ra-modal-list">
-        <li><b>세션 시작</b> — “Start session” 버튼을 누르면 무작위로 조성(Key)과 BPM이 정해집니다.</li>
-        <li><b>나의 차례</b> — 화면 가상 건반을 마우스로 누르거나, 키보드 <kbd>A S D F G H J K L</kbd> (흰 건반), <kbd>W E R T Y U I O</kbd> (검은 건반)으로 노트를 입력합니다. <kbd>Backspace</kbd>로 마지막 노트 취소, <kbd>Enter</kbd>로 확정합니다.</li>
-        <li><b>AI 응답</b> — 내 멜로디를 듣고 AI가 응답을 생성·연주합니다.</li>
-        <li><b>교환 반복</b> — 한 라운드당 3번 주고받습니다. 라운드가 끝나면 조성 일관성·리듬 유사도·모티프 활용·창의성 보너스 4가지 기준으로 점수가 계산됩니다.</li>
-        <li><b>최종 결과</b> — 모든 라운드가 끝나면 누적 점수와 등급(S/A/B/C)이 나옵니다. 1라운드 첫 멜로디를 마지막 라운드에서 다시 사용하면 모티프 보너스 +150점이 추가됩니다.</li>
-      </ol>
-      <p class="ra-modal-foot">팁: 너무 길게 연주하지 마세요. 짧고 분명한 모티프가 좋은 응답을 만듭니다.</p>
+      <!-- PART 1 -->
+      <div class="ra-howto-pane active" data-pane="play">
+        <h3 class="ra-howto-h">어떻게 진행되나요?</h3>
+        <ul class="ra-modal-list ra-modal-list-bullets">
+          <li>총 5라운드, 라운드마다 AI와 멜로디를 주고받습니다.</li>
+          <li>매 라운드는 3번의 교환으로 이루어집니다.<br/><span class="ra-howto-dim">→ 내가 먼저 연주 → AI가 응답 → 내가 다시 연주 (×3)</span></li>
+          <li>가상 피아노 건반을 클릭하거나 키보드 단축키로 음을 입력하세요.</li>
+          <li>입력을 마치면 <b>[확정]</b> 버튼 또는 <kbd>Enter</kbd>를 누르세요.</li>
+          <li>최대 16개의 음을 입력할 수 있고, 최소 제한은 없습니다.</li>
+          <li>마지막으로 입력한 음은 <kbd>Backspace</kbd>로 취소할 수 있습니다.</li>
+        </ul>
+        <div class="ra-key-table">
+          <div class="ra-key-row"><span class="ra-key-label">흰 건반</span><span><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><kbd>F</kbd><kbd>G</kbd><kbd>H</kbd><kbd>J</kbd><kbd>K</kbd> → C D E F G A B C</span></div>
+          <div class="ra-key-row"><span class="ra-key-label">검은 건반</span><span><kbd>W</kbd><kbd>E</kbd><kbd>R</kbd><kbd>T</kbd><kbd>Y</kbd> → C# D# F# G# A#</span></div>
+          <div class="ra-key-row"><span class="ra-key-label">옥타브 ↑</span><span><kbd>Shift</kbd> + <kbd>↑</kbd></span></div>
+          <div class="ra-key-row"><span class="ra-key-label">옥타브 ↓</span><span><kbd>Shift</kbd> + <kbd>↓</kbd></span></div>
+          <div class="ra-key-row"><span class="ra-key-label">마지막 음 취소</span><span><kbd>Backspace</kbd></span></div>
+          <div class="ra-key-row"><span class="ra-key-label">확정</span><span><kbd>Enter</kbd></span></div>
+        </div>
+      </div>
+
+      <!-- PART 2 -->
+      <div class="ra-howto-pane" data-pane="score">
+        <h3 class="ra-howto-h">무엇으로 점수를 받나요?</h3>
+        <p class="ra-howto-sub">교환마다 최대 1000점. 아래 4가지 기준으로 평가합니다.</p>
+        <div class="ra-score-item" style="--pt:#7B9FD4;">
+          <div class="ra-score-item-head"><b>① 조성 일관성</b><span>최대 300점</span></div>
+          <p>라운드마다 조성(Key)이 정해집니다. 그 조성의 스케일 안에 있는 음을 많이 쓸수록 높은 점수를 받습니다.<br/><span class="ra-howto-dim">예: D minor 라운드에서 D minor 스케일 음을 80% 쓰면 → 240점</span></p>
+        </div>
+        <div class="ra-score-item" style="--pt:#6FBF8F;">
+          <div class="ra-score-item-head"><b>② 리듬 호응</b><span>최대 300점</span></div>
+          <p>AI가 응답한 리듬 패턴을 얼마나 따라갔는지 평가합니다. 완전히 같을 필요는 없지만, 박자감이 비슷할수록 유리합니다.<br/><span class="ra-howto-dim">(첫 번째 교환은 AI 응답이 없으므로 자동 만점 처리)</span></p>
+        </div>
+        <div class="ra-score-item" style="--pt:#9B8FD4;">
+          <div class="ra-score-item-head"><b>③ 모티프 활용</b><span>최대 300점</span></div>
+          <p>1라운드 첫 번째 교환에서 내가 입력한 멜로디가 게임 전체의 ‘기준 모티프’가 됩니다. 이후 교환에서 그 멜로디의 앞부분(첫 3~4음)이 다시 등장할수록 점수를 받습니다.<br/><span class="ra-howto-dim">(1라운드 첫 교환은 자동 만점)</span></p>
+        </div>
+        <div class="ra-score-item" style="--pt:#E8C26A;">
+          <div class="ra-score-item-head"><b>④ 창의성 보너스</b><span>최대 100점</span></div>
+          <p>AI의 응답을 그대로 따라하지 않으면 +50점. 음정이나 리듬에 변형을 주면 추가 +50점.</p>
+        </div>
+        <div class="ra-score-item" style="--pt:#E89A6A;">
+          <div class="ra-score-item-head"><b>⑤ R5 모티프 보너스</b><span>최대 150점 · 5라운드 한정</span></div>
+          <p>마지막 라운드에서 기준 모티프를 50% 이상 활용하면 +150점 보너스!</p>
+        </div>
+      </div>
+
+      <!-- PART 3 -->
+      <div class="ra-howto-pane" data-pane="tips">
+        <h3 class="ra-howto-h">잘 하려면 어떻게 해야 하나요?</h3>
+        <ul class="ra-tip-list">
+          <li><span class="ra-tip-ico">🎼</span><span><b>라운드 시작 전 Key를 확인하세요.</b><br/>"Key: D minor" 라면 레·미♭·파·솔·라·시♭·도 안에서 연주하면 유리합니다.</span></li>
+          <li><span class="ra-tip-ico">🔁</span><span><b>1라운드 첫 연주가 가장 중요합니다.</b><br/>이 멜로디가 게임 전체의 기준이 됩니다. 기억하기 쉬운 짧은 패턴을 만들어보세요.</span></li>
+          <li><span class="ra-tip-ico">👂</span><span><b>AI의 리듬을 잘 들어보세요.</b><br/>AI가 응답한 뒤, 그 박자감을 다음 입력에 반영하면 리듬 호응 점수가 올라갑니다.</span></li>
+          <li><span class="ra-tip-ico">🎹</span><span><b>마지막 라운드에서 첫 멜로디로 돌아오세요.</b><br/>R5에서 처음 만든 모티프를 다시 쓰면 +150점 보너스를 받습니다.</span></li>
+        </ul>
+        <div class="ra-grade-tables">
+          <div class="ra-grade-block">
+            <div class="ra-grade-cap">라운드 등급</div>
+            <div class="ra-grade-row"><span>⭐⭐⭐ PERFECT</span><span>950+</span></div>
+            <div class="ra-grade-row"><span>⭐⭐ GREAT</span><span>800+</span></div>
+            <div class="ra-grade-row"><span>⭐ CLEAR</span><span>600+</span></div>
+            <div class="ra-grade-row"><span>TRY AGAIN</span><span>&lt; 600</span></div>
+          </div>
+          <div class="ra-grade-block">
+            <div class="ra-grade-cap">최종 등급 (5000점 만점)</div>
+            <div class="ra-grade-row"><span>S</span><span>4500+</span></div>
+            <div class="ra-grade-row"><span>A</span><span>3500+</span></div>
+            <div class="ra-grade-row"><span>B</span><span>2500+</span></div>
+            <div class="ra-grade-row"><span>C</span><span>&lt; 2500</span></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -2355,10 +2821,10 @@ with gr.Blocks(title="RespondAI") as app:
     </div>
     <h2 id="ra-modal-devs-title" class="ra-modal-title">Developers</h2>
     <div class="ra-modal-body">
-      <p>RespondAI는 음악 AI와 사람의 즉흥 인터랙션을 탐구하는 학생 프로젝트입니다.</p>
+      <p>RespondAI는 음악 AI와 사람의 즉흥 인터랙션을 탐구하는 <b>Deep Learning for Music and Audio</b> final project입니다.</p>
       <ul class="ra-modal-list ra-modal-list-bullets">
-        <li><b>Team A — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
-        <li><b>Team B — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
+        <li><b>박시현 (Team A) — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
+        <li><b>강유영 (Team B) — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
       </ul>
       <p class="ra-modal-foot">코드와 자세한 문서는 상단의 GitHub 링크에서 확인하세요.</p>
     </div>
@@ -2369,8 +2835,7 @@ with gr.Blocks(title="RespondAI") as app:
                 btn_piano_start  = gr.Button("Start session", variant="primary", scale=0,
                                              elem_classes=["mode-card", "pill-cta", "pill-cta-primary"],
                                              elem_id="btn-piano-start")
-                btn_humming_start = gr.Button("Humming mode", variant="secondary", scale=0,
-                                              interactive=False,
+                btn_humming_start = gr.Button("🎤 Humming mode (Beta)", variant="secondary", scale=0,
                                               elem_classes=["mode-card", "pill-cta", "pill-cta-ghost"],
                                               elem_id="btn-humming-start")
 
@@ -2391,7 +2856,15 @@ with gr.Blocks(title="RespondAI") as app:
                     with gr.Column(elem_classes=["piano-roll-host"]):
                         s3_roll = gr.Plot(show_label=False)
                     s3_viz_ai = gr.HTML(render_energy_svg([], "ai"), elem_classes=["viz-side"])
-                s3_piano     = gr.HTML(render_piano_html(4))
+                with gr.Column(elem_id="s3-piano-host") as s3_piano_host:
+                    s3_piano = gr.HTML(render_piano_html(4))
+                with gr.Column(visible=False, elem_id="s3-mic-host",
+                               elem_classes=["s3-mic-host"]) as s3_mic_host:
+                    s3_mic = gr.Audio(
+                        sources=["microphone"], type="numpy", format="wav",
+                        label="🎤 Press record, hum, then press Enter (or Stop)",
+                        show_label=True, elem_id="s3-mic-input",
+                    )
                 s3_note_list = gr.HTML(note_list_html([]), elem_classes=["ra-note-list-host"])
                 s3_audio     = gr.HTML("", elem_id="s3-exchange-audio")
             with gr.Row(elem_classes=["screen-actions", "s3-actions-bar"]):
@@ -2421,7 +2894,7 @@ with gr.Blocks(title="RespondAI") as app:
         with gr.Column(visible=True, elem_classes=["game-panel", "panel-s5", "hide"]) as screen_s5:
             with gr.Column(elem_classes=["screen-body", "s5-body"]):
                 s5_result_html = gr.HTML()
-                with gr.Column(elem_classes=["piano-roll-host", "s5-roll-hidden"]):
+                with gr.Column(elem_classes=["piano-roll-host", "s5-roll-host"]):
                     s5_roll = gr.Plot(show_label=False)
             with gr.Row(elem_classes=["screen-actions", "s5-actions"]):
                 btn_restart = gr.Button("↻  Play again", scale=0,
@@ -2471,6 +2944,18 @@ with gr.Blocks(title="RespondAI") as app:
         outputs=[state, s2_info, screen_nav],
     ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
+    def on_humming_start(st):
+        st = init_state()
+        st["mode"] = "humming"
+        st["key"]  = random.choice(KEYS)
+        st["bpm"]  = random.choice(BPM_CHOICES)
+        return st, _s2_info_html(st), _nav(st, "S2")
+
+    btn_humming_start.click(
+        on_humming_start, inputs=[state],
+        outputs=[state, s2_info, screen_nav],
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
+
     # S2 → S3 — 상태·S3 UI·화면 전환을 한 번에 (분리 시 Gradio 6 하얀 화면)
     def on_round_start(st):
         st["exchange"]      = 1
@@ -2479,6 +2964,7 @@ with gr.Blocks(title="RespondAI") as app:
         st["current_notes"] = []
         st["ai_notes"]      = []
         st["exchange_log"]  = []
+        is_humming = st["mode"] == "humming"
         return (
             st,
             hud_html(st),
@@ -2493,6 +2979,9 @@ with gr.Blocks(title="RespondAI") as app:
             gr.update(interactive=False),
             gr.update(interactive=False),
             _stop_audio(),
+            gr.update(visible=not is_humming),   # s3_piano_host
+            gr.update(visible=is_humming),        # s3_mic_host
+            gr.update(value=None),                # s3_mic — 이전 녹음 비우기
             _nav(st, "S3"),
             _phase(st),
         )
@@ -2502,7 +2991,9 @@ with gr.Blocks(title="RespondAI") as app:
         outputs=[
             state, s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
             s3_piano, btn_confirm, btn_cancel, btn_preview, btn_next_inline,
-            btn_restart_inline, s3_audio, screen_nav, phase_nav,
+            btn_restart_inline, s3_audio,
+            s3_piano_host, s3_mic_host, s3_mic,
+            screen_nav, phase_nav,
         ],
     )
     round_start_chain.then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
@@ -2545,6 +3036,32 @@ with gr.Blocks(title="RespondAI") as app:
 
     btn_cancel.click(on_cancel, inputs=[state], outputs=_note_outputs, **_note_click_kw)
 
+    # 허밍 녹음 → PESTO 음 인식 (피아노 클릭과 동일하게 current_notes 채움)
+    def on_humming_record(audio, st):
+        if st["phase"] != "user_input":
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st), gr.update()
+        try:
+            notes = humming_to_notes(audio, bpm=st["bpm"])
+        except Exception as exc:           # PESTO/오디오 오류 시 게임 흐름 유지
+            print(f"[humming] recognition failed: {exc}")
+            notes = []
+        st["current_notes"] = notes
+        return (
+            st,
+            note_list_html(st["current_notes"]),
+            render_piano_roll(st),
+            render_energy_svg(st["current_notes"], "player"),
+        )
+
+    # 녹음 시작 → JS 플래그 (Enter 자동정지 판단용)
+    s3_mic.start_recording(fn=None, js=MIC_START_JS)
+    # 정지 → PESTO 인식(프로세싱 표시 숨김) → Enter 로 정지했다면 자동 전송
+    s3_mic.stop_recording(
+        on_humming_record, inputs=[s3_mic, state],
+        outputs=[state, s3_note_list, s3_roll, s3_viz_player],
+        show_progress="hidden",
+    ).then(fn=None, js=MIC_AFTER_STOP_JS)
+
     def on_preview(st):
         yield gr.update(value="")
         audio = build_round_audio(st["current_notes"], [], st["bpm"])
@@ -2556,6 +3073,7 @@ with gr.Blocks(title="RespondAI") as app:
         state, s3_roll, s3_note_list, s3_hud_html, s3_viz_player, s3_viz_ai, s3_piano,
         btn_confirm, btn_cancel, btn_preview, btn_next_inline, btn_restart_inline, s3_audio,
         s4_result_html, s5_result_html, s5_roll, phase_nav, exchange_nav,
+        s3_mic,   # 교환마다 마이크 비워 새 녹음 시작 (허밍 모드)
     ]
     _CONFIRM_NOOP = (gr.update(),) * 15
     _LOCKED_BTNS = (
@@ -2596,7 +3114,7 @@ with gr.Blocks(title="RespondAI") as app:
     def on_confirm(st):
         """AI 생성 → 재생 yield → 대기 → YOUR TURN (한 제너레이터에서 state 동기화)."""
         if st["phase"] != "user_input":
-            yield (st,) + _CONFIRM_NOOP + (_phase(st), str(len(st["exchange_log"])))
+            yield (st,) + _CONFIRM_NOOP + (_phase(st), str(len(st["exchange_log"])), gr.update())
             return
 
         _T = {}
@@ -2627,26 +3145,17 @@ with gr.Blocks(title="RespondAI") as app:
             *_confirm_tail,
             "ai_response",
             str(len(st["exchange_log"])),
+            gr.update(),                          # s3_mic (no-op)
         )
         _T["after_yield1"] = time.time()
         print(f"[TIMING] yield1(thinking) render: {_T['after_yield1'] - _T['before_yield1']:.3f}s")
 
 
-        max_bars, max_new_tokens = generation_limits(user_notes)
         _T["before_generate"] = time.time()
-        #t0 = time.time()
-        result = generate(
-            _MODEL, _TOKENIZER, user_notes,
-            key=key_token, tempo=st["bpm"],
-            max_bars=max_bars,
-            max_new_tokens=max_new_tokens,
-            temperature=0.95,
-            return_attention=False,
-        )
+        ai_notes, result = generate_ai_notes(user_notes, key_token, st["bpm"])
         _T["after_generate"] = time.time()
         print(f"[TIMING] generate(): {_T['after_generate'] - _T['before_generate']:.3f}s")
-        ai_notes = fit_ai_response_to_user(result.response_notes, user_notes, st["bpm"])
-        attn_scores = align_attn_to_notes(result.attn_scores, ai_notes)
+        attn_scores = align_attn_to_notes(result.attn_scores if result else [], ai_notes)
 
         _T["before_score"] = time.time()
         score = compute_exchange_score(
@@ -2694,13 +3203,17 @@ with gr.Blocks(title="RespondAI") as app:
             *_confirm_tail,
             "ai_response",
             str(len(st["exchange_log"])),
+            gr.update(),                          # s3_mic (no-op)
         )
         _T["after_yield2"] = time.time()
         print(f"[TIMING] yield2(playing) render: {_T['after_yield2'] - _T['before_yield2']:.3f}s")
 
 
-        # 재생 종료 직후 YOUR TURN (짧은 버퍼만 — 이전 +1.0s 제거)
-        time.sleep(0.3)
+        # 마지막 교환(3번째 AI 응답)은 AI 소리를 끝까지 들은 뒤 결과 화면(S4)으로,
+        # 그 외 교환은 짧은 버퍼만 두고 바로 다음 입력(YOUR TURN)으로.
+        is_last_exchange = len(st["exchange_log"]) >= MAX_EXCHANGES
+        _wait_sec = max(0.3, playback_ms / 1000.0) if is_last_exchange else 0.3
+        time.sleep(_wait_sec)
         _T["end"] = time.time()
         print(f"[TIMING] ─────────────────────────────")
         print(f"[TIMING] 전체 on_confirm 서버 처리: {_T['end'] - _T['start']:.3f}s")
@@ -2709,7 +3222,7 @@ with gr.Blocks(title="RespondAI") as app:
         print(f"[TIMING]   score()        : {_T['after_score'] - _T['before_score']:.3f}s")
         print(f"[TIMING]   audio()        : {_T['after_audio'] - _T['before_audio']:.3f}s")
         print(f"[TIMING]   yield2 render  : {_T['after_yield2'] - _T['before_yield2']:.3f}s")
-        print(f"[TIMING]   sleep          : 0.300s (fixed)")
+        print(f"[TIMING]   sleep          : {_wait_sec:.3f}s ({'full playback' if is_last_exchange else 'buffer'})")
         print(f"[TIMING] ─────────────────────────────")
 
 
@@ -2731,6 +3244,7 @@ with gr.Blocks(title="RespondAI") as app:
                 *_confirm_tail,
                 "user_input",
                 str(completed),
+                gr.update(value=None),            # s3_mic 비우기 → 다음 교환 새 녹음
             )
         else:
             _finalize_round(st)
@@ -2748,6 +3262,7 @@ with gr.Blocks(title="RespondAI") as app:
                 s4, s5, roll,
                 _phase(st),
                 str(completed),
+                gr.update(value=None),            # s3_mic 비우기 (라운드 종료)
             )
     COMBINED_JS = """(screenId, phase) => {
       const id = String(screenId || 'S1').trim().toUpperCase();
@@ -2765,6 +3280,7 @@ with gr.Blocks(title="RespondAI") as app:
       if (phase) window._raPhase = String(phase).trim();
       const ae = document.activeElement;
       if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ae.blur();
+      window.raPlayResultCue && window.raPlayResultCue();
     }"""
 
     confirm_chain = btn_confirm.click(
@@ -2780,9 +3296,15 @@ with gr.Blocks(title="RespondAI") as app:
 
     # S4 → S2 (다음 라운드) 또는 S5 (세션 종료)
     def on_next_from_s4(st):
+        # 화면 전환과 내용 채움을 한 핸들러에서 원자적으로 (분리 시 갱신 누락 발생)
         if st["round"] >= TOTAL_ROUNDS:
             st["phase"] = "game_over"
-            return st, _nav(st, "S5")
+            nav = _nav(st, "S5")
+            return (
+                st, nav, gr.update(),
+                s5_html(st),
+                render_full_history_roll(st["round_results"]),
+            )
         st["round"] += 1
         st["exchange"] = 1
         st["exchange_log"] = []
@@ -2791,25 +3313,14 @@ with gr.Blocks(title="RespondAI") as app:
         st["phase"] = "user_input"
         st["key"] = random.choice(KEYS)
         st["bpm"] = random.choice(BPM_CHOICES)
-        return st, _nav(st, "S2")
-
-    def on_next_from_s4_ui(st):
-        if st.get("screen") == "S5":
-            return (
-                gr.update(),
-                s5_html(st),
-                render_full_history_roll(st["round_results"]),
-            )
-        return _s2_info_html(st), gr.update(), gr.update()
+        nav = _nav(st, "S2")
+        return st, nav, _s2_info_html(st), gr.update(), gr.update()
 
     btn_next_round.click(
         on_next_from_s4, inputs=[state],
-        outputs=[state, screen_nav],
+        outputs=[state, screen_nav, s2_info, s5_result_html, s5_roll],
     ).then(
         fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav],
-    ).then(
-        on_next_from_s4_ui, inputs=[state],
-        outputs=[s2_info, s5_result_html, s5_roll],
     )
 
     # S3 "See result" (라운드 종료 후 수동 이동용 백업)
