@@ -1232,14 +1232,79 @@ def s5_html(state: dict) -> str:
             f'</div>'
         )
 
+    # ── 좌측: 라운드별 결과 행 ────────────────────────────────────────────────
+    def _stars(score: int) -> str:
+        if score >= 950: return "⭐⭐⭐"
+        if score >= 800: return "⭐⭐"
+        if score >= 600: return "⭐"
+        return "—"
+
+    round_rows = ""
+    for rr in round_results:
+        rn = rr["round_num"]
+        cond = ROUND_CONDITIONS.get(rn, "")
+        round_rows += (
+            f'<div class="s5-round-row">'
+            f'<span class="s5-round-rn">R{rn}</span>'
+            f'<span class="s5-round-cond">{cond}</span>'
+            f'<span class="s5-round-stars">{_stars(rr["total"])}</span>'
+            f'<span class="s5-round-score">{rr["total"]}</span>'
+            f'</div>'
+        )
+
+    # ── 우측: 3개 항목 평균 게이지 ────────────────────────────────────────────
+    all_ex = [e for rr in round_results for e in rr["exchange_scores"]]
+    n_ex = max(1, len(all_ex))
+
+    def _avg(metric: str) -> float:
+        return sum(e[metric] for e in all_ex) / n_ex
+
+    def _gauge(icon, label, desc, value, color, hint):
+        pct = min(100, int(value / 300 * 100))
+        hint_html = (
+            f'<div class="s5-gauge-hint">💡 {hint}</div>' if pct < 50 and hint else ""
+        )
+        return (
+            f'<div class="s5-gauge">'
+            f'<div class="s5-gauge-head"><span>{icon} {label}</span><span>{pct}%</span></div>'
+            f'<div class="s5-gauge-desc">{desc}</div>'
+            f'<div class="s5-gauge-track"><div class="s5-gauge-fill" style="width:{pct}%;background:{color};"></div></div>'
+            f'{hint_html}'
+            f'</div>'
+        )
+
+    gauges = (
+        _gauge("🎵", "조성 일관성", "라운드의 Key 스케일 안에서 연주한 비율",
+               _avg("key_consistency"), "#7B9FD4",
+               "다음엔 Key 스케일 안의 음 위주로 연주해보세요")
+        + _gauge("🥁", "리듬 호응", "AI의 리듬 패턴에 얼마나 맞춰 응답했는가",
+                 _avg("rhythm_similarity"), "#6FBF8F",
+                 "AI 응답의 박자감을 다음 입력에 반영해보세요")
+        + _gauge("🔁", "모티프 활용", "첫 라운드 멜로디를 얼마나 기억하고 활용했는가",
+                 _avg("motif_usage"), "#9B8FD4",
+                 "1라운드 첫 멜로디를 다시 사용해보세요")
+    )
+
+    flavor = '<div class="s5-flavor">당신의 연주 세션이 끝났습니다.</div>'
+
     return f"""
-<div class="s5-stage">
-  <div class="s5-label">● SESSION COMPLETE</div>
-  <div class="s5-headline">See what technology<br/>can do for music.</div>
+<div class="s5-stage s5-stage-v2">
+  <div class="s5-label">● FINAL RESULT</div>
   <div class="s5-grade" style="color:{gc};">{grade}</div>
   <div class="s5-total">{final_total} <span class="s5-of">/ 5000</span></div>
+  {flavor}
   {bonus_detail}
-  <div class="s5-halfsphere"></div>
+  <div class="s5-cols">
+    <div class="s5-col s5-col-rounds">
+      <div class="s5-col-cap">라운드별 결과</div>
+      {round_rows}
+    </div>
+    <div class="s5-col s5-col-metrics">
+      <div class="s5-col-cap">항목별 분석 · 5라운드 평균</div>
+      {gauges}
+    </div>
+  </div>
+  <div class="s5-roll-cap">● 세션 전체 피아노롤 · <span style="color:#7B9FD4;">파랑 You</span> / <span style="color:#FF4A6E;">빨강 AI</span></div>
 </div>
 """
 
@@ -1954,7 +2019,7 @@ button.pill-cta.pill-cta-primary:hover {
 .s5-roll-hidden { display: none !important; }
 .s5-body {
   position: relative !important;
-  overflow: hidden !important;
+  overflow-y: auto !important;
   padding: 0 !important;
 }
 .s5-stage {
@@ -2017,6 +2082,54 @@ button.pill-cta.pill-cta-primary:hover {
   z-index: 0;
 }
 .s5-stage > * { position: relative; z-index: 1; }
+
+/* S5 v2 — 정보형 결과 레이아웃 */
+.s5-stage-v2 { padding: 30px 34px 18px; justify-content: flex-start; }
+.s5-stage-v2 .s5-grade { margin-top: 12px; font-size: 72px; }
+.s5-stage-v2 .s5-total { margin-top: 6px; font-size: 24px; }
+.s5-flavor { margin-top: 8px; font-size: 13px; color: var(--accent); letter-spacing: 0.3px; }
+.s5-cols {
+  display: flex; gap: 22px; width: 100%;
+  max-width: 760px; margin: 22px auto 6px;
+  text-align: left; flex-wrap: wrap;
+}
+.s5-col { flex: 1 1 320px; min-width: 260px; }
+.s5-col-cap {
+  font-size: 10.5px; font-weight: 600; letter-spacing: 1.4px;
+  text-transform: uppercase; color: var(--accent);
+  margin-bottom: 10px;
+}
+.s5-round-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,0.08);
+  font-size: 12.5px; color: #E8E6F0;
+}
+.s5-round-rn { flex: 0 0 28px; font-weight: 600; color: var(--accent); }
+.s5-round-cond {
+  flex: 1 1 auto; color: #B8B4C8; font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.s5-round-stars { flex: 0 0 auto; font-size: 11px; letter-spacing: -1px; }
+.s5-round-score { flex: 0 0 48px; text-align: right; font-weight: 600; color: #F0EEFA; }
+.s5-gauge { margin-bottom: 14px; }
+.s5-gauge-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 12.5px; font-weight: 500; color: #ECEAF4;
+}
+.s5-gauge-desc { font-size: 11px; color: #9D99AE; margin: 2px 0 5px; }
+.s5-gauge-track {
+  height: 6px; border-radius: 3px;
+  background: rgba(255,255,255,0.1); overflow: hidden;
+}
+.s5-gauge-fill { height: 6px; border-radius: 3px; transition: width 0.6s ease; }
+.s5-gauge-hint { font-size: 10.5px; color: #E8C26A; margin-top: 4px; }
+.s5-roll-cap {
+  width: 100%; max-width: 760px; margin: 14px auto 0;
+  text-align: left; font-size: 10.5px; letter-spacing: 0.6px;
+  color: #9D99AE;
+}
+.s5-roll-host { display: block !important; margin: 6px auto 0; max-width: 820px; width: 100%; }
+
 .s5-actions {
   position: relative !important;
   z-index: 3 !important;
@@ -2685,7 +2798,7 @@ with gr.Blocks(title="RespondAI") as app:
         with gr.Column(visible=True, elem_classes=["game-panel", "panel-s5", "hide"]) as screen_s5:
             with gr.Column(elem_classes=["screen-body", "s5-body"]):
                 s5_result_html = gr.HTML()
-                with gr.Column(elem_classes=["piano-roll-host", "s5-roll-hidden"]):
+                with gr.Column(elem_classes=["piano-roll-host", "s5-roll-host"]):
                     s5_roll = gr.Plot(show_label=False)
             with gr.Row(elem_classes=["screen-actions", "s5-actions"]):
                 btn_restart = gr.Button("↻  Play again", scale=0,
