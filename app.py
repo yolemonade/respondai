@@ -2416,7 +2416,7 @@ button.pill-cta.pill-cta-primary:hover {
 .ra-howto-tabs {
   display: flex; gap: 6px;
   margin: 2px 0 14px;
-  padding-bottom: 2px;
+  padding-bottom: 4px;
   border-bottom: 1px solid rgba(0,0,0,0.08);
 }
 .ra-howto-tab {
