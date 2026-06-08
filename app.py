@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
 from input.piano import synth_notes
+from input.humming import humming_to_notes
 from inference.generate import load_model_for_inference, generate
 #from inference.decode import notes_to_wav
 
@@ -2369,8 +2370,7 @@ with gr.Blocks(title="RespondAI") as app:
                 btn_piano_start  = gr.Button("Start session", variant="primary", scale=0,
                                              elem_classes=["mode-card", "pill-cta", "pill-cta-primary"],
                                              elem_id="btn-piano-start")
-                btn_humming_start = gr.Button("Humming mode", variant="secondary", scale=0,
-                                              interactive=False,
+                btn_humming_start = gr.Button("🎤 Humming mode (Beta)", variant="secondary", scale=0,
                                               elem_classes=["mode-card", "pill-cta", "pill-cta-ghost"],
                                               elem_id="btn-humming-start")
 
@@ -2391,7 +2391,15 @@ with gr.Blocks(title="RespondAI") as app:
                     with gr.Column(elem_classes=["piano-roll-host"]):
                         s3_roll = gr.Plot(show_label=False)
                     s3_viz_ai = gr.HTML(render_energy_svg([], "ai"), elem_classes=["viz-side"])
-                s3_piano     = gr.HTML(render_piano_html(4))
+                with gr.Column(elem_id="s3-piano-host") as s3_piano_host:
+                    s3_piano = gr.HTML(render_piano_html(4))
+                with gr.Column(visible=False, elem_id="s3-mic-host",
+                               elem_classes=["s3-mic-host"]) as s3_mic_host:
+                    s3_mic = gr.Audio(
+                        sources=["microphone"], type="numpy", format="wav",
+                        label="🎤 Hum your melody, then stop recording",
+                        show_label=True, elem_id="s3-mic-input",
+                    )
                 s3_note_list = gr.HTML(note_list_html([]), elem_classes=["ra-note-list-host"])
                 s3_audio     = gr.HTML("", elem_id="s3-exchange-audio")
             with gr.Row(elem_classes=["screen-actions", "s3-actions-bar"]):
@@ -2471,6 +2479,18 @@ with gr.Blocks(title="RespondAI") as app:
         outputs=[state, s2_info, screen_nav],
     ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
+    def on_humming_start(st):
+        st = init_state()
+        st["mode"] = "humming"
+        st["key"]  = random.choice(KEYS)
+        st["bpm"]  = random.choice(BPM_CHOICES)
+        return st, _s2_info_html(st), _nav(st, "S2")
+
+    btn_humming_start.click(
+        on_humming_start, inputs=[state],
+        outputs=[state, s2_info, screen_nav],
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
+
     # S2 → S3 — 상태·S3 UI·화면 전환을 한 번에 (분리 시 Gradio 6 하얀 화면)
     def on_round_start(st):
         st["exchange"]      = 1
@@ -2479,6 +2499,7 @@ with gr.Blocks(title="RespondAI") as app:
         st["current_notes"] = []
         st["ai_notes"]      = []
         st["exchange_log"]  = []
+        is_humming = st["mode"] == "humming"
         return (
             st,
             hud_html(st),
@@ -2493,6 +2514,9 @@ with gr.Blocks(title="RespondAI") as app:
             gr.update(interactive=False),
             gr.update(interactive=False),
             _stop_audio(),
+            gr.update(visible=not is_humming),   # s3_piano_host
+            gr.update(visible=is_humming),        # s3_mic_host
+            gr.update(value=None),                # s3_mic — 이전 녹음 비우기
             _nav(st, "S3"),
             _phase(st),
         )
@@ -2502,7 +2526,9 @@ with gr.Blocks(title="RespondAI") as app:
         outputs=[
             state, s3_hud_html, s3_roll, s3_viz_player, s3_viz_ai, s3_note_list,
             s3_piano, btn_confirm, btn_cancel, btn_preview, btn_next_inline,
-            btn_restart_inline, s3_audio, screen_nav, phase_nav,
+            btn_restart_inline, s3_audio,
+            s3_piano_host, s3_mic_host, s3_mic,
+            screen_nav, phase_nav,
         ],
     )
     round_start_chain.then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
@@ -2544,6 +2570,29 @@ with gr.Blocks(title="RespondAI") as app:
         return st, note_list_html(st["current_notes"]), render_piano_roll(st)
 
     btn_cancel.click(on_cancel, inputs=[state], outputs=_note_outputs, **_note_click_kw)
+
+    # 허밍 녹음 → PESTO 음 인식 (피아노 클릭과 동일하게 current_notes 채움)
+    def on_humming_record(audio, st):
+        if st["phase"] != "user_input":
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st), gr.update()
+        try:
+            notes = humming_to_notes(audio, bpm=st["bpm"])
+        except Exception as exc:           # PESTO/오디오 오류 시 게임 흐름 유지
+            print(f"[humming] recognition failed: {exc}")
+            notes = []
+        st["current_notes"] = notes
+        return (
+            st,
+            note_list_html(st["current_notes"]),
+            render_piano_roll(st),
+            render_energy_svg(st["current_notes"], "player"),
+        )
+
+    s3_mic.stop_recording(
+        on_humming_record, inputs=[s3_mic, state],
+        outputs=[state, s3_note_list, s3_roll, s3_viz_player],
+        show_progress="minimal",
+    )
 
     def on_preview(st):
         yield gr.update(value="")
