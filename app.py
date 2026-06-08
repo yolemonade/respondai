@@ -39,7 +39,7 @@ from inference.generate import load_model_for_inference, generate
 MAX_EXCHANGES  = 3
 MAX_NOTES      = 16
 DEFAULT_DURATION = 2   # sixteenth-note steps per note slot
-TOTAL_ROUNDS   = 5
+TOTAL_ROUNDS   = 2  # 테스트용 (발표 전 5로 복원) — MAX_EXCHANGES=3 고정
 AI_MODE        = "model"
 
 CHECKPOINT_PATH = "checkpoints/best_inference.pt"
@@ -2605,6 +2605,7 @@ with gr.Blocks(title="RespondAI") as app:
         state, s3_roll, s3_note_list, s3_hud_html, s3_viz_player, s3_viz_ai, s3_piano,
         btn_confirm, btn_cancel, btn_preview, btn_next_inline, btn_restart_inline, s3_audio,
         s4_result_html, s5_result_html, s5_roll, phase_nav, exchange_nav,
+        s3_mic,   # 교환마다 마이크 비워 새 녹음 시작 (허밍 모드)
     ]
     _CONFIRM_NOOP = (gr.update(),) * 15
     _LOCKED_BTNS = (
@@ -2645,7 +2646,7 @@ with gr.Blocks(title="RespondAI") as app:
     def on_confirm(st):
         """AI 생성 → 재생 yield → 대기 → YOUR TURN (한 제너레이터에서 state 동기화)."""
         if st["phase"] != "user_input":
-            yield (st,) + _CONFIRM_NOOP + (_phase(st), str(len(st["exchange_log"])))
+            yield (st,) + _CONFIRM_NOOP + (_phase(st), str(len(st["exchange_log"])), gr.update())
             return
 
         _T = {}
@@ -2676,6 +2677,7 @@ with gr.Blocks(title="RespondAI") as app:
             *_confirm_tail,
             "ai_response",
             str(len(st["exchange_log"])),
+            gr.update(),                          # s3_mic (no-op)
         )
         _T["after_yield1"] = time.time()
         print(f"[TIMING] yield1(thinking) render: {_T['after_yield1'] - _T['before_yield1']:.3f}s")
@@ -2743,6 +2745,7 @@ with gr.Blocks(title="RespondAI") as app:
             *_confirm_tail,
             "ai_response",
             str(len(st["exchange_log"])),
+            gr.update(),                          # s3_mic (no-op)
         )
         _T["after_yield2"] = time.time()
         print(f"[TIMING] yield2(playing) render: {_T['after_yield2'] - _T['before_yield2']:.3f}s")
@@ -2780,6 +2783,7 @@ with gr.Blocks(title="RespondAI") as app:
                 *_confirm_tail,
                 "user_input",
                 str(completed),
+                gr.update(value=None),            # s3_mic 비우기 → 다음 교환 새 녹음
             )
         else:
             _finalize_round(st)
@@ -2797,6 +2801,7 @@ with gr.Blocks(title="RespondAI") as app:
                 s4, s5, roll,
                 _phase(st),
                 str(completed),
+                gr.update(value=None),            # s3_mic 비우기 (라운드 종료)
             )
     COMBINED_JS = """(screenId, phase) => {
       const id = String(screenId || 'S1').trim().toUpperCase();
