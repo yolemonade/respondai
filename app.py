@@ -2341,11 +2341,11 @@ button.pill-cta.pill-cta-primary:hover {
 }
 .ra-modal-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 6px;
+  margin-bottom: 12px;
 }
 .ra-modal-eyebrow {
-  font-size: 10px; font-weight: 500;
-  letter-spacing: 2.4px; text-transform: uppercase;
+  font-size: 22px; font-weight: 500;
+  letter-spacing: 0.4px; text-transform: uppercase;
   color: var(--accent);
 }
 .ra-modal-close {
@@ -2367,13 +2367,7 @@ button.pill-cta.pill-cta-primary:hover {
   background: rgba(0,0,0,0.04) !important;
   opacity: 1 !important;
 }
-.ra-modal-title {
-  margin: 4px 0 14px;
-  font-size: 22px;
-  font-weight: 500;
-  letter-spacing: -0.3px;
-  color: var(--light-h);
-}
+.ra-modal-title { display: none; }
 .ra-modal-body {
   font-size: 13.5px;
   line-height: 1.65;
