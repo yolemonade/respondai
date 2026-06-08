@@ -700,6 +700,22 @@ KEYBOARD_JS = """() => {
     return !!(r && r.width > 0 && r.height > 0);
   }
 
+  // 건반 입력(소리 포함)은 오직 실제 라운드의 피아노 입력 중에만 허용:
+  // S3 화면 + 피아노 모드(화면 피아노가 보임) + AI 응답 중이 아님.
+  // → 메인/점수/허밍 화면에서는 키보드를 눌러도 건반 소리가 나지 않음.
+  function isGameInputActive() {
+    if (isInputLocked()) return false;
+    const roots = [document];
+    document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
+      if (h.shadowRoot) roots.push(h.shadowRoot);
+    });
+    for (const root of roots) {
+      const host = root.querySelector('#s3-piano-host');
+      if (host && isVisible(host)) return true;
+    }
+    return false;
+  }
+
   function gradioBtn(id) {
     const roots = [document];
     document.querySelectorAll('gradio-app, .gradio-container').forEach(h => {
@@ -888,7 +904,7 @@ KEYBOARD_JS = """() => {
   window.addEventListener('touchstart', unlockAudio, { capture: true });
 
   document.addEventListener('mousedown', function(e) {
-    if (isInputLocked()) return;
+    if (!isGameInputActive()) return;
     const key = e.target.closest && e.target.closest('[data-midi]');
     if (!key || !key.dataset.midi) return;
       e.preventDefault();
@@ -904,7 +920,7 @@ KEYBOARD_JS = """() => {
   // 옥타브 이동: Shift + ↑ / ↓ (입력 잠금 중이 아닐 때)
   window.addEventListener('keydown', function(e) {
     if (!e.shiftKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
-    if (isInputLocked()) return;
+    if (!isGameInputActive()) return;
     e.preventDefault();
     e.stopImmediatePropagation();
     if (e.key === 'ArrowUp')   baseOctave = Math.min(6, baseOctave + 1);
@@ -913,7 +929,7 @@ KEYBOARD_JS = """() => {
 
   window.addEventListener('keydown', function(e) {
     if (!isGameKey(e)) return;
-    if (isInputLocked()) return;
+    if (!isGameInputActive()) return;
     if (e.repeat) return;
     e.preventDefault();
     e.stopImmediatePropagation();
@@ -2423,10 +2439,21 @@ button.pill-cta.pill-cta-primary:hover {
 .ra-howto-h { margin: 4px 0 10px; font-size: 15px; font-weight: 600; color: var(--light-h); }
 .ra-howto-sub { margin: 0 0 14px; font-size: 12.5px; color: #565660; }
 .ra-howto-dim { color: #5A5560; font-size: 12.5px; }
-/* Gradio 기본 prose 색 덮어쓰기 방지 — 본문 글씨 진하게 */
-.ra-modal-body .ra-modal-list li,
-.ra-modal-body .ra-modal-list-bullets li,
-.ra-tip-list li { color: #2A2A30 !important; }
+/* Gradio 기본 prose 색이 자식(p/li/span)을 덮어써 연하게 보이는 문제 방지 —
+   모달 본문 전체 글씨를 진하게 강제하고, 의도적으로 연한 보조 텍스트만 예외 처리 */
+.ra-modal-card { background: #FFFFFF !important; }
+.ra-modal-body,
+.ra-modal-body p,
+.ra-modal-body li,
+.ra-modal-body span,
+.ra-modal-body b,
+.ra-modal-body div { color: #2A2A30 !important; }
+/* 의도적으로 연한 보조 텍스트 예외 */
+.ra-modal-body .ra-howto-dim { color: #5A5560 !important; }
+.ra-modal-body .ra-howto-sub { color: #565660 !important; }
+.ra-modal-body .ra-score-item-head span { color: #6A6A72 !important; }
+.ra-modal-body .ra-grade-row span:last-child { color: #6A6A72 !important; }
+.ra-modal-body .ra-grade-cap { color: var(--accent-deep) !important; }
 
 /* 키보드 단축키 표 — 코드블록 스타일 */
 .ra-key-table {
@@ -2729,10 +2756,10 @@ with gr.Blocks(title="RespondAI") as app:
     </div>
     <h2 id="ra-modal-devs-title" class="ra-modal-title">Developers</h2>
     <div class="ra-modal-body">
-      <p>RespondAI는 음악 AI와 사람의 즉흥 인터랙션을 탐구하는 학생 프로젝트입니다.</p>
+      <p>RespondAI는 음악 AI와 사람의 즉흥 인터랙션을 탐구하는 <b>Deep Learning for Music and Audio</b> final project입니다.</p>
       <ul class="ra-modal-list ra-modal-list-bullets">
-        <li><b>Team A — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
-        <li><b>Team B — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
+        <li><b>박시현 (Team A) — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
+        <li><b>강유영 (Team B) — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
       </ul>
       <p class="ra-modal-foot">코드와 자세한 문서는 상단의 GitHub 링크에서 확인하세요.</p>
     </div>
@@ -2850,7 +2877,7 @@ with gr.Blocks(title="RespondAI") as app:
     btn_piano_start.click(
         on_piano_start, inputs=[state],
         outputs=[state, s2_info, screen_nav],
-    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav]).then(fn=None, js=CHIME_JS)
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
     def on_humming_start(st):
         st = init_state()
@@ -2862,7 +2889,7 @@ with gr.Blocks(title="RespondAI") as app:
     btn_humming_start.click(
         on_humming_start, inputs=[state],
         outputs=[state, s2_info, screen_nav],
-    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav]).then(fn=None, js=CHIME_JS)
+    ).then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
 
     # S2 → S3 — 상태·S3 UI·화면 전환을 한 번에 (분리 시 Gradio 6 하얀 화면)
     def on_round_start(st):
@@ -2906,7 +2933,6 @@ with gr.Blocks(title="RespondAI") as app:
     )
     round_start_chain.then(fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav])
     round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
-    round_start_chain.then(fn=None, js=CHIME_JS)
 
     def on_note_event(midi: int, st: dict):
         """건반 입력 — 노트 목록 + 피아노롤(미확정 노트 반투명)."""
