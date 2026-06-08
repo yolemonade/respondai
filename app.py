@@ -2100,7 +2100,7 @@ button.pill-cta.pill-cta-primary:hover {
 .s5-stage > * { position: relative; z-index: 1; }
 
 /* S5 v2 — 정보형 결과 레이아웃 */
-.s5-stage-v2 { padding: 30px 34px 18px; justify-content: flex-start; }
+.s5-stage-v2 { padding: 2px 34px 18px; justify-content: flex-start; }
 .s5-stage-v2 .s5-grade { margin-top: 12px; font-size: 72px; }
 .s5-stage-v2 .s5-total { margin-top: 6px; font-size: 24px; }
 .s5-flavor { margin-top: 8px; font-size: 13px; color: var(--accent); letter-spacing: 0.3px; }
