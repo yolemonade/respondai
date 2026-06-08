@@ -2422,7 +2422,11 @@ button.pill-cta.pill-cta-primary:hover {
 .ra-howto-pane.active { display: block; }
 .ra-howto-h { margin: 4px 0 10px; font-size: 15px; font-weight: 600; color: var(--light-h); }
 .ra-howto-sub { margin: 0 0 14px; font-size: 12.5px; color: #565660; }
-.ra-howto-dim { color: #7A7A84; font-size: 12.5px; }
+.ra-howto-dim { color: #5A5560; font-size: 12.5px; }
+/* Gradio 기본 prose 색 덮어쓰기 방지 — 본문 글씨 진하게 */
+.ra-modal-body .ra-modal-list li,
+.ra-modal-body .ra-modal-list-bullets li,
+.ra-tip-list li { color: #2A2A30 !important; }
 
 /* 키보드 단축키 표 — 코드블록 스타일 */
 .ra-key-table {
@@ -3198,9 +3202,15 @@ with gr.Blocks(title="RespondAI") as app:
 
     # S4 → S2 (다음 라운드) 또는 S5 (세션 종료)
     def on_next_from_s4(st):
+        # 화면 전환과 내용 채움을 한 핸들러에서 원자적으로 (분리 시 갱신 누락 발생)
         if st["round"] >= TOTAL_ROUNDS:
             st["phase"] = "game_over"
-            return st, _nav(st, "S5")
+            nav = _nav(st, "S5")
+            return (
+                st, nav, gr.update(),
+                s5_html(st),
+                render_full_history_roll(st["round_results"]),
+            )
         st["round"] += 1
         st["exchange"] = 1
         st["exchange_log"] = []
@@ -3209,25 +3219,14 @@ with gr.Blocks(title="RespondAI") as app:
         st["phase"] = "user_input"
         st["key"] = random.choice(KEYS)
         st["bpm"] = random.choice(BPM_CHOICES)
-        return st, _nav(st, "S2")
-
-    def on_next_from_s4_ui(st):
-        if st.get("screen") == "S5":
-            return (
-                gr.update(),
-                s5_html(st),
-                render_full_history_roll(st["round_results"]),
-            )
-        return _s2_info_html(st), gr.update(), gr.update()
+        nav = _nav(st, "S2")
+        return st, nav, _s2_info_html(st), gr.update(), gr.update()
 
     btn_next_round.click(
         on_next_from_s4, inputs=[state],
-        outputs=[state, screen_nav],
+        outputs=[state, screen_nav, s2_info, s5_result_html, s5_roll],
     ).then(
         fn=None, js=SHOW_SCREEN_JS, inputs=[screen_nav],
-    ).then(
-        on_next_from_s4_ui, inputs=[state],
-        outputs=[s2_info, s5_result_html, s5_roll],
     )
 
     # S3 "See result" (라운드 종료 후 수동 이동용 백업)
