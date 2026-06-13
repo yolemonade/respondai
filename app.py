@@ -7,7 +7,6 @@ import random
 import time
 import wave as _wave
 from typing import List, Optional
-import time
 
 import matplotlib
 matplotlib.use("Agg")
@@ -26,15 +25,18 @@ import matplotlib.patches as mpatches
 import numpy as np
 import gradio as gr
 
-from concurrent.futures import ThreadPoolExecutor
 from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
 from input.piano import synth_notes, mock_ai_response
 from input.humming import humming_to_notes
-from inference.generate import load_model_for_inference, generate, generate_candidates
+from inference.generate import load_model_for_inference, generate_candidates
 from analysis.rhythm import rhythm_similarity
 from analysis.motif import motif_overlap
 #from inference.decode import notes_to_wav
+
+from input.jazz_backing import (
+    build_round_audio as build_jazz_round_audio,
+)
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -690,46 +692,22 @@ def build_round_audio(
     ai_notes: List[Note],
     bpm: int,
     swing_amount: float = 0.60,
+    key_token: Optional[str] = None,
+    round_num: int = 1,
+    exchange_num: int = 1,
 ) -> tuple:
-    """Return (sample_rate, int16_mono) with jazz swing/humanization."""
-    gap = np.zeros(int(0.15 * SAMPLE_RATE), dtype=np.float32)
-    swing_amount = float(np.clip(swing_amount, 0.0, 1.0))
-
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f_user = ex.submit(
-            synth_notes,
-            user_notes,
-            bpm=bpm,
-            sample_rate=SAMPLE_RATE,
-            role="user",
-            swing_amount=min(swing_amount, 0.52),
-            humanize_ms=2.0,
-        )
-        f_ai = ex.submit(
-            synth_notes,
-            ai_notes,
-            bpm=bpm,
-            sample_rate=SAMPLE_RATE,
-            role="ai",
-            tail_sec=0.05,
-            swing_amount=swing_amount,
-            humanize_ms=8.0,
-        )
-        user_wav = f_user.result()
-        ai_wav = f_ai.result()
-
-    ai_max_samples = int(AI_RESPONSE_MAX_SEC * SAMPLE_RATE)
-    if len(ai_wav) > ai_max_samples:
-        ai_wav = ai_wav[:ai_max_samples]
-
-    combined = np.concatenate([user_wav, gap, ai_wav])
-    peak = float(np.abs(combined).max())
-    if peak < 1e-8:
-        combined = gap
-        peak = float(np.abs(gap).max()) or 1.0
-
-    combined = (combined / peak * 0.92).astype(np.float32)
-    return (SAMPLE_RATE, (combined * 32767).astype(np.int16))
+    """Delegate rendering to the random jazz backing module."""
+    return build_jazz_round_audio(
+        user_notes,
+        ai_notes,
+        bpm,
+        sample_rate=SAMPLE_RATE,
+        ai_response_max_sec=AI_RESPONSE_MAX_SEC,
+        swing_amount=swing_amount,
+        key_token=key_token,
+        round_num=round_num,
+        exchange_num=exchange_num,
+    )
 
 
 # ─── Piano roll rendering ────────────────────────────────────────────────────
@@ -3549,13 +3527,20 @@ with gr.Blocks(title="RespondAI") as app:
 
     def on_preview(st):
         yield gr.update(value="")
+
         audio = build_round_audio(
             st["current_notes"],
             [],
             st["bpm"],
-            swing_amount=st.get("swing_amount", 0.60),
+            swing_amount=st.get(
+                "swing_amount",
+                0.60,
+            ),
         )
-        yield gr.update(value=audio_to_html(audio))
+
+        yield gr.update(
+            value=audio_to_html(audio)
+        )
 
     btn_preview.click(on_preview, inputs=[state], outputs=[s3_audio])
 
@@ -3677,6 +3662,9 @@ with gr.Blocks(title="RespondAI") as app:
             ai_notes,
             st["bpm"],
             swing_amount=st.get("swing_amount", 0.60),
+            key_token=key_token,
+            round_num=st["round"],
+            exchange_num=exchange_num,
         )
         _T["after_audio"] = time.time()
         print(f"[TIMING] build_round_audio(): {_T['after_audio'] - _T['before_audio']:.3f}s")
