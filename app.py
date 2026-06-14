@@ -7,7 +7,6 @@ import random
 import time
 import wave as _wave
 from typing import List, Optional
-import time
 
 import matplotlib
 matplotlib.use("Agg")
@@ -26,13 +25,18 @@ import matplotlib.patches as mpatches
 import numpy as np
 import gradio as gr
 
-from concurrent.futures import ThreadPoolExecutor
 from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
 from input.piano import synth_notes, mock_ai_response
 from input.humming import humming_to_notes
-from inference.generate import load_model_for_inference, generate
+from inference.generate import load_model_for_inference, generate_candidates
+from analysis.rhythm import rhythm_similarity
+from analysis.motif import motif_overlap
 #from inference.decode import notes_to_wav
+
+from input.jazz_backing import (
+    build_round_audio as build_jazz_round_audio,
+)
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -72,6 +76,9 @@ EXCHANGE_STEPS = (MAX_NOTES * DEFAULT_DURATION) + 8   # x-width per exchange slo
 AI_MAX_BARS_CAP = 2
 AI_RESPONSE_MAX_SEC = 4.0
 AI_MAX_NOTES_EMPTY = 4
+
+# 피아노 입력 타임라인 상한: 최대 2마디(16분음표 그리드)
+INPUT_MAX_STEPS = AI_MAX_BARS_CAP * STEPS_PER_BAR
 
 # 키보드 입력 확장: 흰 건반(a s d f g h j k l), 검은 건반(w e r t y u i o)
 KB_WHITE_SEMIS = [0, 2, 4, 5, 7, 9, 11, 12, 14]          # C4..D5
@@ -115,39 +122,82 @@ def generation_limits(user_notes: List[Note]) -> tuple[int, int]:
     return max_bars, max_new_tokens
 
 
-def compact_note_timeline(notes: List[Note], max_span: int) -> List[Note]:
-    """마디 패딩·긴 공백 제거 — 노트를 이어 붙여 재생."""
+def trim_note_timeline(
+    notes: List[Note],
+    max_span: int,
+    max_notes: int,
+) -> List[Note]:
+    """첫 음을 0으로 옮기되 모델이 만든 쉼표와 리듬은 유지한다."""
     if not notes:
         return []
-    ordered = sorted(notes, key=lambda n: (n.start, n.end, n.pitch))
+
+    ordered = sorted(
+        notes,
+        key=lambda n: (n.start, n.end, n.pitch),
+    )
+
+    origin = ordered[0].start
     out: List[Note] = []
-    t = 0
-    for n in ordered:
-        dur = max(1, min(n.end - n.start, 8))
-        if t + dur > max_span:
+
+    for note in ordered:
+        start = note.start - origin
+        end = note.end - origin
+
+        if start >= max_span:
             break
-        out.append(Note(n.pitch, t, t + dur))
-        t += dur
+
+        end = min(end, max_span)
+
+        if end <= start:
+            continue
+
+        out.append(
+            Note(
+                pitch=note.pitch,
+                start=start,
+                end=end,
+            )
+        )
+
+        if len(out) >= max_notes:
+            break
+
     return out
 
 
 def fit_ai_response_to_user(
-    ai_notes: List[Note], user_notes: List[Note], bpm: int,
+    ai_notes: List[Note],
+    user_notes: List[Note],
+    bpm: int,
 ) -> List[Note]:
-    """유저와 비슷한 길이·밀도로 AI 노트 정리 (무음 구간 제거, 재생 ≤4초)."""
     if not ai_notes:
         return []
+
     cap_steps = ai_timeline_cap_steps(bpm)
-    user_span = max(n.end for n in user_notes) if user_notes else cap_steps // 2
+    user_span = (
+        max(n.end for n in user_notes)
+        if user_notes
+        else cap_steps // 2
+    )
+
     if user_notes:
-        max_notes = min(MAX_NOTES, len(user_notes) + 2)
-        max_span = min(user_span + 4, cap_steps)
+        max_notes = min(
+            MAX_NOTES,
+            max(6, len(user_notes) + 4),
+        )
+        max_span = min(
+            user_span + 8,
+            cap_steps,
+        )
     else:
         max_notes = AI_MAX_NOTES_EMPTY
         max_span = cap_steps
 
-    trimmed = sorted(ai_notes, key=lambda n: (n.start, n.end))[:max_notes]
-    return compact_note_timeline(trimmed, max_span=max_span)
+    return trim_note_timeline(
+        ai_notes,
+        max_span=max_span,
+        max_notes=max_notes,
+    )
 
 
 def align_attn_to_notes(attn_scores: List[float], notes: List[Note]) -> List[float]:
@@ -167,33 +217,265 @@ _MODEL, _TOKENIZER, _DEVICE = load_model_for_inference(CHECKPOINT_PATH)
 print(f"[RespondAI] Model ready on {_DEVICE} ({sum(p.numel() for p in _MODEL.parameters()):,} params)")
 
 
-def generate_ai_notes(user_notes: List[Note], key_token: str, bpm: int):
-    """AI 응답 생성 — 모델이 빈 응답(즉시 EOS)을 내면 재시도 후 폴백.
+NUM_CANDIDATES = 4  # 배치로 동시 생성할 후보 수 (비용은 1개 생성과 거의 동일)
 
-    모델은 짧은 입력에서 즉시 EOS 를 자주 내보내 response_notes 가 비고,
-    그 경우 피아노롤에 AI(빨강) 노트가 그려지지 않는다. 항상 보이도록:
-      1) 1차 생성 → 비면 온도 낮춰 1회 재시도
-      2) 그래도 비면 유저 멜로디 옥타브 변형(mock)으로 폴백
-    Returns (ai_notes, result)  — result 는 마지막 generate 결과(attn 용).
+
+def _copy_ratio(cand: List[Note], user_notes: List[Note]) -> float:
+    """후보가 CALL 을 위치까지 그대로 베낀 정도 (0~1).
+
+    같은 인덱스의 pitch 일치 비율 — 모티프를 *다른 위치/변형*으로 재사용하면
+    낮게, 처음부터 그대로 따라 치면 높게 나온다.
     """
-    max_bars, max_new_tokens = generation_limits(user_notes)
-    result = None
-    for temp in (0.95, 0.8):
-        result = generate(
-            _MODEL, _TOKENIZER, user_notes,
-            key=key_token, tempo=bpm,
-            max_bars=max_bars, max_new_tokens=max_new_tokens,
-            temperature=temp, return_attention=False,
+    a = [n.pitch for n in user_notes]
+    b = [n.pitch for n in cand]
+    if not a or not b:
+        return 0.0
+    k = min(len(a), len(b))
+    return sum(x == y for x, y in zip(a, b)) / k
+
+def _target_score(
+    value: float,
+    target: float,
+    tolerance: float,
+) -> float:
+    return max(
+        0.0,
+        1.0 - abs(value - target) / tolerance,
+    )
+
+
+def _melodic_variety(notes: List[Note]) -> float:
+    if len(notes) < 2:
+        return 0.0
+
+    pitches = [n.pitch for n in notes]
+    intervals = [
+        b - a
+        for a, b in zip(pitches, pitches[1:])
+    ]
+
+    unique_pitch_ratio = (
+        len(set(pitches)) / len(pitches)
+    )
+
+    unique_interval_ratio = (
+        len(set(intervals)) / len(intervals)
+        if intervals else 0.0
+    )
+
+    pitch_range_score = min(
+        1.0,
+        (max(pitches) - min(pitches)) / 12.0,
+    )
+
+    repeated_rate = sum(
+        a == b
+        for a, b in zip(pitches, pitches[1:])
+    ) / max(1, len(pitches) - 1)
+
+    large_leap_rate = sum(
+        abs(interval) >= 12
+        for interval in intervals
+    ) / max(1, len(intervals))
+
+    return (
+        0.35 * unique_pitch_ratio
+        + 0.35 * unique_interval_ratio
+        + 0.30 * pitch_range_score
+        - 0.75 * repeated_rate
+        - 0.25 * large_leap_rate
+    )
+
+def _jazz_rhythm_score(notes: List[Note]) -> float:
+    """싱코페이션·쉼표·길이 변화가 있는 후보에 작은 보너스를 준다."""
+    if len(notes) < 2:
+        return 0.0
+
+    ordered = sorted(notes, key=lambda n: (n.start, n.end, n.pitch))
+    starts = [n.start for n in ordered]
+    durations = [max(1, n.end - n.start) for n in ordered]
+
+    offbeat_rate = sum(start % 4 != 0 for start in starts) / len(starts)
+    offbeat_target = max(0.0, 1.0 - abs(offbeat_rate - 0.42) / 0.42)
+
+    gaps = [
+        max(0, right.start - left.end)
+        for left, right in zip(ordered, ordered[1:])
+    ]
+    gap_rate = sum(gap > 0 for gap in gaps) / max(1, len(gaps))
+    duration_variety = min(1.0, len(set(durations)) / 4.0)
+
+    return (
+        0.45 * offbeat_target
+        + 0.30 * duration_variety
+        + 0.25 * min(1.0, gap_rate * 2.0)
+    )
+
+
+def _rank_candidate(
+    cand: List[Note],
+    user_notes: List[Note],
+    key_token: str,
+    previous_ai_notes: Optional[List[Note]] = None,
+) -> float:
+    if not cand:
+        return -1.0
+
+    key_score = key_consistency(
+        cand,
+        key_token,
+    )
+
+    if not user_notes:
+        return (
+            1.5 * key_score
+            + 0.8 * _melodic_variety(cand)
         )
-        ai_notes = fit_ai_response_to_user(result.response_notes, user_notes, bpm)
-        if ai_notes:
-            return ai_notes, result
 
-    # 폴백: 유저 입력 옥타브 변형(항상 비어있지 않음) → 입력 없으면 빈 채로 반환
-    fallback = mock_ai_response(user_notes) if user_notes else []
-    ai_notes = fit_ai_response_to_user(fallback, user_notes, bpm) or fallback
-    return ai_notes, result
+    rhythm = max(
+        0.0,
+        rhythm_similarity(user_notes, cand),
+    )
+    motif = motif_overlap(
+        user_notes,
+        cand,
+    )
 
+    # 완전히 같은 리듬보다 적당히 관련된 변형을 선호
+    rhythm_relation = _target_score(
+        rhythm,
+        target=0.50,
+        tolerance=0.55,
+    )
+
+    # 모티프도 100% 복사보다 30~50% 활용을 선호
+    motif_relation = _target_score(
+        motif,
+        target=0.40,
+        tolerance=0.40,
+    )
+
+    copy_penalty = _copy_ratio(
+        cand,
+        user_notes,
+    )
+
+    score = (
+        1.50 * key_score
+        + 0.65 * rhythm_relation
+        + 0.85 * motif_relation
+        + 0.80 * _melodic_variety(cand)
+        + 0.45 * _jazz_rhythm_score(cand)
+        - 1.10 * copy_penalty
+    )
+
+    # 이전 AI 응답과 또 비슷한 결과가 나오는 것도 억제
+    if previous_ai_notes:
+        previous_motif = motif_overlap(
+            previous_ai_notes,
+            cand,
+        )
+        previous_rhythm = max(
+            0.0,
+            rhythm_similarity(
+                previous_ai_notes,
+                cand,
+            ),
+        )
+
+        score -= 0.55 * previous_motif
+        score -= 0.25 * previous_rhythm
+
+    return score
+
+
+def generate_ai_notes(
+    user_notes: List[Note],
+    key_token: str,
+    bpm: int,
+    previous_ai_notes: Optional[List[Note]] = None,
+):
+    max_bars, max_new_tokens = generation_limits(
+        user_notes,
+    )
+
+    candidates = generate_candidates(
+        _MODEL,
+        _TOKENIZER,
+        user_notes,
+        key=key_token,
+        tempo=bpm,
+        num_candidates=NUM_CANDIDATES,
+        max_bars=max_bars,
+        max_new_tokens=max_new_tokens,
+
+        # 후보마다 안정적 → 모험적인 순서
+        temperature=(0.82, 0.95, 1.08, 1.18),
+        top_p=0.95,
+
+        # pitch 반복만 완만하게 억제
+        repetition_penalty=1.10,
+        rep_window=8,
+    )
+
+    scored = []
+
+    for candidate in candidates:
+        fitted = fit_ai_response_to_user(
+            candidate,
+            user_notes,
+            bpm,
+        )
+
+        if not fitted:
+            continue
+
+        score = _rank_candidate(
+            fitted,
+            user_notes,
+            key_token,
+            previous_ai_notes,
+        )
+
+        scored.append((score, fitted))
+
+    if scored:
+        scored.sort(
+            key=lambda item: item[0],
+            reverse=True,
+        )
+
+        # 1등과 2등 차이가 작으면 항상 같은 안전한 후보를
+        # 선택하지 않고 75:25로 선택
+        if (
+            len(scored) >= 2
+            and scored[0][0] - scored[1][0] < 0.25
+        ):
+            chosen = random.choices(
+                scored[:2],
+                weights=[0.75, 0.25],
+                k=1,
+            )[0]
+        else:
+            chosen = scored[0]
+
+        return chosen[1], None
+
+    fallback = (
+        mock_ai_response(user_notes)
+        if user_notes
+        else []
+    )
+
+    return (
+        fit_ai_response_to_user(
+            fallback,
+            user_notes,
+            bpm,
+        )
+        or fallback,
+        None,
+    )
 
 # ─── State helpers ───────────────────────────────────────────────────────────
 
@@ -212,6 +494,11 @@ def init_state() -> dict:
         "bpm": 90,
         "mode": "piano",
         "total_score": 0,
+
+        "cursor_step": 0,
+        "note_duration": 2,
+        "input_events": [],
+        "swing_amount": 0.60,
     }
 
 
@@ -220,6 +507,40 @@ def round_grade(score: int) -> str:
     if score >= 800: return "⭐⭐ Well played!"
     if score >= 600: return "⭐ Nicely done!"
     return "A little short — keep going!"
+
+
+def reset_note_input(st: dict) -> None:
+    """현재 교환의 입력 내용만 초기화한다.
+
+    note_duration은 사용자가 UI에서 고른 값을 유지한다.
+    """
+    st["current_notes"] = []
+    st["input_events"] = []
+    st["cursor_step"] = 0
+    st.setdefault("note_duration", DEFAULT_DURATION)
+
+
+def _notes_from_input_events(events: List[dict]) -> List[Note]:
+    """입력 이벤트 중 note 이벤트만 Note 목록으로 변환한다."""
+    notes: List[Note] = []
+    for event in events:
+        if event.get("kind") != "note":
+            continue
+        notes.append(
+            Note(
+                int(event["pitch"]),
+                int(event["start"]),
+                int(event["end"]),
+            )
+        )
+    return notes
+
+
+def _event_cursor(events: List[dict]) -> int:
+    """마지막 note/rest 이벤트가 끝난 스텝을 반환한다."""
+    if not events:
+        return 0
+    return int(events[-1]["end"])
 
 
 # ─── Scoring ─────────────────────────────────────────────────────────────────
@@ -331,11 +652,15 @@ def estimate_playback_ms(user_notes: List[Note], ai_notes: List[Note], bpm: int)
     return int(sec * 1000)
 
 
-def audio_to_html(audio_tuple) -> str:
+def audio_to_html(audio_tuple, *, notify_done: bool = False, playback_ms: int = 0) -> str:
     """Convert (sample_rate, int16_ndarray) to an autoplay HTML audio element.
 
     Uses a native <audio> element to bypass WaveSurfer's retained playback
     position bug in gr.Audio — each call creates a fresh DOM element at t=0.
+
+    notify_done=True 이면 재생 종료(onended) 시 숨김 버튼 #btn-audio-done 을
+    클릭해 서버에 '재생 끝' 이벤트를 전달한다. playback_ms 는 data-ms 속성에
+    실려 confirm 체인의 워치독(WATCHDOG_JS) 타임아웃 계산에 쓰인다.
     """
     sample_rate, data = audio_tuple
     buf = io.BytesIO()
@@ -345,9 +670,20 @@ def audio_to_html(audio_tuple) -> str:
         wf.setframerate(sample_rate)
         wf.writeframes(data.tobytes())
     b64 = base64.b64encode(buf.getvalue()).decode()
+    if not notify_done:
+        return (
+            f'<audio autoplay src="data:audio/wav;base64,{b64}" '
+            f'style="display:none" id="s3-audio-el"></audio>'
+        )
+    _click = (
+        "clearTimeout(window._raWd);"
+        "(function(){var b=document.getElementById('btn-audio-done');"
+        "var t=b?(b.querySelector('button')||b):null;if(t)t.click();})();"
+    )
     return (
         f'<audio autoplay src="data:audio/wav;base64,{b64}" '
-        f'style="display:none" id="s3-audio-el"></audio>'
+        f'style="display:none" id="s3-audio-el" data-ms="{int(playback_ms)}" '
+        f'onended="{_click}" onerror="{_click}"></audio>'
     )
 
 
@@ -355,26 +691,23 @@ def build_round_audio(
     user_notes: List[Note],
     ai_notes: List[Note],
     bpm: int,
+    swing_amount: float = 0.60,
+    key_token: Optional[str] = None,
+    round_num: int = 1,
+    exchange_num: int = 1,
 ) -> tuple:
-    """Return (sample_rate, int16_mono) for audio synthesis."""
-    gap = np.zeros(int(0.15 * SAMPLE_RATE), dtype=np.float32)
-    
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f_user = ex.submit(synth_notes, user_notes, bpm=bpm, sample_rate=SAMPLE_RATE, role="user")
-        f_ai   = ex.submit(synth_notes, ai_notes,   bpm=bpm, sample_rate=SAMPLE_RATE, role="ai", tail_sec=0.05)
-        user_wav = f_user.result()
-        ai_wav   = f_ai.result()
-        
-    ai_max_samples = int(AI_RESPONSE_MAX_SEC * SAMPLE_RATE)
-    if len(ai_wav) > ai_max_samples:
-        ai_wav = ai_wav[:ai_max_samples]
-    combined = np.concatenate([user_wav, gap, ai_wav])
-    peak = float(np.abs(combined).max())
-    if peak < 1e-8:
-        combined = gap
-        peak = float(np.abs(gap).max()) or 1.0
-    combined = (combined / peak * 0.92).astype(np.float32)
-    return (SAMPLE_RATE, (combined * 32767).astype(np.int16))
+    """Delegate rendering to the random jazz backing module."""
+    return build_jazz_round_audio(
+        user_notes,
+        ai_notes,
+        bpm,
+        sample_rate=SAMPLE_RATE,
+        ai_response_max_sec=AI_RESPONSE_MAX_SEC,
+        swing_amount=swing_amount,
+        key_token=key_token,
+        round_num=round_num,
+        exchange_num=exchange_num,
+    )
 
 
 # ─── Piano roll rendering ────────────────────────────────────────────────────
@@ -701,7 +1034,8 @@ KEYBOARD_JS = """() => {
   }
 
   function isInputLocked() {
-    return readPhase() === 'ai_response';
+    const p = readPhase();
+    return p === 'ai_response' || p === 'ai_playing';
   }
 
   function isVisible(el) {
@@ -1194,6 +1528,8 @@ def hud_html(state: dict) -> str:
         badge = '<div class="ra-turn-badge ra-turn-player">● YOUR TURN</div>'
     elif phase == "ai_response":
         badge = '<div class="ra-turn-badge ra-turn-ai">● AI RESPONDING</div>'
+    elif phase == "ai_playing":
+        badge = '<div class="ra-turn-badge ra-turn-ai">● AI PLAYING</div>'
     elif phase == "round_result":
         badge = '<div class="ra-turn-badge ra-turn-result">● ROUND RESULT</div>'
     else:
@@ -1399,6 +1735,19 @@ def s5_html(state: dict) -> str:
 
 APP_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap');
+
+/* 화면 밖 숨김 버튼 (audio onended 브리지) — display:none 이면 일부 환경에서
+   programmatic click 이 무시되므로 위치만 밖으로 뺀다. */
+.ra-hidden-btn {
+  position: absolute !important;
+  left: -9999px !important;
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
 
 :root {
   --light-bg:    #FAFAF9;
@@ -2858,6 +3207,27 @@ with gr.Blocks(title="RespondAI") as app:
                     s3_viz_ai = gr.HTML(render_energy_svg([], "ai"), elem_classes=["viz-side"])
                 with gr.Column(elem_id="s3-piano-host") as s3_piano_host:
                     s3_piano = gr.HTML(render_piano_html(4))
+
+                    with gr.Row(elem_classes=["rhythm-input-controls"]):
+                        note_duration_select = gr.Radio(
+                            choices=[
+                                ("1/16", 1),
+                                ("1/8", 2),
+                                ("Dotted 1/8", 3),
+                                ("1/4", 4),
+                                ("Dotted 1/4", 6),
+                                ("1/2", 8),
+                            ],
+                            value=2,
+                            label="Note length",
+                            scale=4,
+                        )
+
+                        btn_rest = gr.Button(
+                            "Rest",
+                            scale=1,
+                            elem_classes=["game-pill", "game-pill-sm"],
+                        )
                 with gr.Column(visible=False, elem_id="s3-mic-host",
                                elem_classes=["s3-mic-host"]) as s3_mic_host:
                     s3_mic = gr.Audio(
@@ -2903,6 +3273,10 @@ with gr.Blocks(title="RespondAI") as app:
         screen_nav = gr.Textbox(value="S1", visible=False, elem_id="ra-screen-nav")
         phase_nav  = gr.Textbox(value="user_input", visible=False, elem_id="ra-phase-nav")
         exchange_nav = gr.Textbox(value="0", visible=False, elem_id="ra-exchange-nav")
+        # 브라우저 <audio>의 onended 가 클릭하는 숨김 버튼 — '재생 끝' 이벤트 브리지.
+        # visible=False 는 DOM에서 빠질 수 있어 CSS(.ra-hidden-btn)로 숨긴다.
+        btn_audio_done = gr.Button("", elem_id="btn-audio-done",
+                                   elem_classes=["ra-hidden-btn"])
 
     # 건반 브리지 (Blocks 맨 끝 + 화면 밖 배치)
     _note_names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
@@ -2961,7 +3335,7 @@ with gr.Blocks(title="RespondAI") as app:
         st["exchange"]      = 1
         st["phase"]         = "user_input"
         st["screen"]        = "S3"
-        st["current_notes"] = []
+        reset_note_input(st)
         st["ai_notes"]      = []
         st["exchange_log"]  = []
         is_humming = st["mode"] == "humming"
@@ -3000,41 +3374,120 @@ with gr.Blocks(title="RespondAI") as app:
     round_start_chain.then(fn=None, js=FOCUS_GAME_JS)
 
     def on_note_event(midi: int, st: dict):
-        """건반 입력 — 노트 목록 + 피아노롤(미확정 노트 반투명)."""
-        notes = st["current_notes"]
-        if st["phase"] == "user_input":
-            if midi == -1:
-                if notes:
-                    st["current_notes"] = notes[:-1]
-            elif 21 <= midi <= 108 and len(notes) < MAX_NOTES:
-                i = len(notes)
-                st["current_notes"] = notes + [
-                    Note(midi, i * DEFAULT_DURATION, (i + 1) * DEFAULT_DURATION)
-                ]
+        """cursor 기반 건반 입력.
+
+        note와 rest를 같은 input_events에 저장하므로 Undo가 둘 다 정확히
+        취소되고, 실제 start/end 리듬이 모델 입력에 전달된다.
+        """
+        if st["phase"] != "user_input":
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st)
+
+        events = list(st.get("input_events", []))
+        duration = max(1, int(st.get("note_duration", DEFAULT_DURATION)))
+        cursor = max(0, int(st.get("cursor_step", 0)))
+
+        if midi == -1:
+            if events:
+                events.pop()
+            st["input_events"] = events
+            st["cursor_step"] = _event_cursor(events)
+            st["current_notes"] = _notes_from_input_events(events)
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st)
+
+        if not 21 <= midi <= 108:
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st)
+
+        if len(st["current_notes"]) >= MAX_NOTES or cursor >= INPUT_MAX_STEPS:
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st)
+
+        end = min(cursor + duration, INPUT_MAX_STEPS)
+        if end <= cursor:
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st)
+
+        events.append({
+            "kind": "note",
+            "pitch": int(midi),
+            "start": cursor,
+            "end": end,
+        })
+        st["input_events"] = events
+        st["cursor_step"] = end
+        st["current_notes"] = _notes_from_input_events(events)
+
         return st, note_list_html(st["current_notes"]), render_piano_roll(st)
 
-    _note_outputs = [state, s3_note_list, s3_roll]
 
+    def on_duration_change(value, st):
+        """다음에 입력할 음/쉼표의 길이를 변경한다."""
+        try:
+            st["note_duration"] = max(1, int(value))
+        except (TypeError, ValueError):
+            st["note_duration"] = DEFAULT_DURATION
+        return st
+
+
+    def on_rest(st):
+        """현재 duration만큼 쉼표를 입력하고 cursor를 전진시킨다."""
+        if st["phase"] != "user_input":
+            return st, note_list_html(st["current_notes"]), render_piano_roll(st)
+
+        events = list(st.get("input_events", []))
+        duration = max(1, int(st.get("note_duration", DEFAULT_DURATION)))
+        cursor = max(0, int(st.get("cursor_step", 0)))
+
+        if cursor < INPUT_MAX_STEPS:
+            end = min(cursor + duration, INPUT_MAX_STEPS)
+            if end > cursor:
+                events.append({
+                    "kind": "rest",
+                    "start": cursor,
+                    "end": end,
+                })
+                st["input_events"] = events
+                st["cursor_step"] = end
+                st["current_notes"] = _notes_from_input_events(events)
+
+        return st, note_list_html(st["current_notes"]), render_piano_roll(st)
+
+
+    _note_outputs = [state, s3_note_list, s3_roll]
     _note_click_kw = dict(show_progress="hidden")
 
-    btn_undo.click(
-        lambda st: on_note_event(-1, st), inputs=[state], outputs=_note_outputs,
+    note_duration_select.change(
+        on_duration_change,
+        inputs=[note_duration_select, state],
+        outputs=[state],
+        show_progress="hidden",
+    )
+
+    btn_rest.click(
+        on_rest,
+        inputs=[state],
+        outputs=_note_outputs,
         **_note_click_kw,
     )
+
+    btn_undo.click(
+        lambda st: on_note_event(-1, st),
+        inputs=[state],
+        outputs=_note_outputs,
+        **_note_click_kw,
+    )
+
     for midi, btn in _note_btn_map:
         btn.click(
             lambda st, m=midi: on_note_event(m, st),
-            inputs=[state], outputs=_note_outputs,
+            inputs=[state],
+            outputs=_note_outputs,
             **_note_click_kw,
         )
 
-    # Cancel last note
-    def on_cancel(st):
-        if st["phase"] == "user_input" and st["current_notes"]:
-            st["current_notes"] = st["current_notes"][:-1]
-        return st, note_list_html(st["current_notes"]), render_piano_roll(st)
-
-    btn_cancel.click(on_cancel, inputs=[state], outputs=_note_outputs, **_note_click_kw)
+    btn_cancel.click(
+        lambda st: on_note_event(-1, st),
+        inputs=[state],
+        outputs=_note_outputs,
+        **_note_click_kw,
+    )
 
     # 허밍 녹음 → PESTO 음 인식 (피아노 클릭과 동일하게 current_notes 채움)
     def on_humming_record(audio, st):
@@ -3046,6 +3499,16 @@ with gr.Blocks(title="RespondAI") as app:
             print(f"[humming] recognition failed: {exc}")
             notes = []
         st["current_notes"] = notes
+        st["input_events"] = [
+            {
+                "kind": "note",
+                "pitch": int(note.pitch),
+                "start": int(note.start),
+                "end": int(note.end),
+            }
+            for note in notes
+        ]
+        st["cursor_step"] = max((note.end for note in notes), default=0)
         return (
             st,
             note_list_html(st["current_notes"]),
@@ -3064,8 +3527,20 @@ with gr.Blocks(title="RespondAI") as app:
 
     def on_preview(st):
         yield gr.update(value="")
-        audio = build_round_audio(st["current_notes"], [], st["bpm"])
-        yield gr.update(value=audio_to_html(audio))
+
+        audio = build_round_audio(
+            st["current_notes"],
+            [],
+            st["bpm"],
+            swing_amount=st.get(
+                "swing_amount",
+                0.60,
+            ),
+        )
+
+        yield gr.update(
+            value=audio_to_html(audio)
+        )
 
     btn_preview.click(on_preview, inputs=[state], outputs=[s3_audio])
 
@@ -3152,7 +3627,12 @@ with gr.Blocks(title="RespondAI") as app:
 
 
         _T["before_generate"] = time.time()
-        ai_notes, result = generate_ai_notes(user_notes, key_token, st["bpm"])
+        ai_notes, result = generate_ai_notes(
+            user_notes,
+            key_token,
+            st["bpm"],
+            previous_ai_notes=st.get("ai_notes") or [],
+        )
         _T["after_generate"] = time.time()
         print(f"[TIMING] generate(): {_T['after_generate'] - _T['before_generate']:.3f}s")
         attn_scores = align_attn_to_notes(result.attn_scores if result else [], ai_notes)
@@ -3174,10 +3654,18 @@ with gr.Blocks(title="RespondAI") as app:
             "attn_scores": attn_scores,
         }]
         st["ai_notes"] = ai_notes
-        st["current_notes"] = []
+        reset_note_input(st)
 
         _T["before_audio"] = time.time()
-        audio = build_round_audio(user_notes, ai_notes, st["bpm"])
+        audio = build_round_audio(
+            user_notes,
+            ai_notes,
+            st["bpm"],
+            swing_amount=st.get("swing_amount", 0.60),
+            key_token=key_token,
+            round_num=st["round"],
+            exchange_num=exchange_num,
+        )
         _T["after_audio"] = time.time()
         print(f"[TIMING] build_round_audio(): {_T['after_audio'] - _T['before_audio']:.3f}s")
         playback_ms = max(
@@ -3189,6 +3677,10 @@ with gr.Blocks(title="RespondAI") as app:
             '<span class="ra-help-dot">●</span> Playing AI response…'
             '</div>'
         )
+        # 재생 단계로 전환 — 이후 진행은 브라우저 onended → on_audio_done 이 담당.
+        st["phase"] = "ai_playing"
+        st["last_attn_scores"] = attn_scores
+
         _T["before_yield2"] = time.time()
         yield (
             st,
@@ -3199,9 +3691,10 @@ with gr.Blocks(title="RespondAI") as app:
             *_LOCKED_BTNS,
             gr.update(interactive=False),
             gr.update(interactive=False),
-            gr.update(value=audio_to_html(audio)),
+            gr.update(value=audio_to_html(audio, notify_done=True,
+                                          playback_ms=playback_ms)),
             *_confirm_tail,
-            "ai_response",
+            "ai_playing",
             str(len(st["exchange_log"])),
             gr.update(),                          # s3_mic (no-op)
         )
@@ -3210,10 +3703,10 @@ with gr.Blocks(title="RespondAI") as app:
 
 
         # 마지막 교환(3번째 AI 응답)은 AI 소리를 끝까지 들은 뒤 결과 화면(S4)으로,
-        # 그 외 교환은 짧은 버퍼만 두고 바로 다음 입력(YOUR TURN)으로.
-        is_last_exchange = len(st["exchange_log"]) >= MAX_EXCHANGES
-        _wait_sec = max(0.3, playback_ms / 1000.0) if is_last_exchange else 0.3
-        time.sleep(_wait_sec)
+        # 마지막 교환(3번째 AI 응답)은 AI 소리를 끝까지 들은 뒤 결과 화면(S4)으로,
+        # 그 외 교환도 재생이 끝난 뒤 다음 입력(YOUR TURN)으로.
+        # → 진행 타이밍은 서버 sleep 추측이 아니라 브라우저 <audio> 의 onended
+        #   이벤트(btn_audio_done 클릭)가 결정한다. on_confirm 은 여기서 끝.
         _T["end"] = time.time()
         print(f"[TIMING] ─────────────────────────────")
         print(f"[TIMING] 전체 on_confirm 서버 처리: {_T['end'] - _T['start']:.3f}s")
@@ -3222,16 +3715,25 @@ with gr.Blocks(title="RespondAI") as app:
         print(f"[TIMING]   score()        : {_T['after_score'] - _T['before_score']:.3f}s")
         print(f"[TIMING]   audio()        : {_T['after_audio'] - _T['before_audio']:.3f}s")
         print(f"[TIMING]   yield2 render  : {_T['after_yield2'] - _T['before_yield2']:.3f}s")
-        print(f"[TIMING]   sleep          : {_wait_sec:.3f}s ({'full playback' if is_last_exchange else 'buffer'})")
         print(f"[TIMING] ─────────────────────────────")
 
+    def on_audio_done(st):
+        """브라우저 오디오 재생 종료(onended/워치독) 시 다음 단계로 진행.
 
+        on_confirm 의 옛 후반부(sleep 이후)를 그대로 옮긴 것. phase 가드로
+        onended + 워치독 중복 클릭을 멱등 처리한다.
+        """
+        if st.get("phase") != "ai_playing":
+            return (st,) + _CONFIRM_NOOP + (
+                _phase(st), str(len(st["exchange_log"])), gr.update())
+
+        attn_scores = st.get("last_attn_scores", [])
         completed = len(st["exchange_log"])
         if completed < MAX_EXCHANGES:
             st["exchange"] = completed + 1
             st["phase"] = "user_input"
             st["screen"] = "S3"
-            yield (
+            return (
                 st,
                 render_piano_roll(st), note_list_html([]), hud_html(st),
                 render_energy_svg([], "player"),
@@ -3240,30 +3742,29 @@ with gr.Blocks(title="RespondAI") as app:
                 *_IDLE_BTNS,
                 gr.update(interactive=False),
                 gr.update(interactive=False),
-                gr.update(),
+                gr.update(value=""),              # 오디오 엘리먼트 제거 (재생 정지)
                 *_confirm_tail,
                 "user_input",
                 str(completed),
                 gr.update(value=None),            # s3_mic 비우기 → 다음 교환 새 녹음
             )
-        else:
-            _finalize_round(st)
-            s4, s5, roll = _result_panel_updates(st)
-            yield (
-                st,
-                render_piano_roll(st), note_list_html([]), hud_html(st),
-                render_energy_svg([], "player"),
-                render_energy_svg(st["ai_notes"], "ai", attn_scores),
-                gr.update(value=""),
-                *_LOCKED_BTNS,
-                gr.update(interactive=False),
-                gr.update(interactive=False),
-                gr.update(),
-                s4, s5, roll,
-                _phase(st),
-                str(completed),
-                gr.update(value=None),            # s3_mic 비우기 (라운드 종료)
-            )
+        _finalize_round(st)
+        s4, s5, roll = _result_panel_updates(st)
+        return (
+            st,
+            render_piano_roll(st), note_list_html([]), hud_html(st),
+            render_energy_svg([], "player"),
+            render_energy_svg(st["ai_notes"], "ai", attn_scores),
+            gr.update(value=""),
+            *_LOCKED_BTNS,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(value=""),                  # 오디오 엘리먼트 제거
+            s4, s5, roll,
+            _phase(st),
+            str(completed),
+            gr.update(value=None),                # s3_mic 비우기 (라운드 종료)
+        )
     COMBINED_JS = """(screenId, phase) => {
       const id = String(screenId || 'S1').trim().toUpperCase();
       const target = 'panel-' + id.toLowerCase();
@@ -3283,11 +3784,39 @@ with gr.Blocks(title="RespondAI") as app:
       window.raPlayResultCue && window.raPlayResultCue();
     }"""
 
+    # 재생 시작 후 워치독 — autoplay 차단·onended 누락 시에도 진행이 멈추지 않게
+    # data-ms(예상 재생 길이) + 3초 뒤 숨김 버튼을 강제 클릭. onended 가 정상
+    # 동작하면 그쪽에서 clearTimeout 하므로 중복 실행되지 않고, 만에 하나
+    # 겹쳐도 on_audio_done 의 phase 가드가 멱등 처리한다.
+    WATCHDOG_JS = """() => {
+      clearTimeout(window._raWd);
+      if (window._raPhase !== 'ai_playing') return;
+      const el = document.getElementById('s3-audio-el');
+      const ms = el ? (parseInt(el.dataset.ms || '0', 10) || 15000) : 15000;
+      window._raWd = setTimeout(() => {
+        if (window._raPhase !== 'ai_playing') return;
+        const b = document.getElementById('btn-audio-done');
+        const t = b ? (b.querySelector('button') || b) : null;
+        if (t) t.click();
+      }, ms + 3000);
+    }"""
+
     confirm_chain = btn_confirm.click(
         lambda: gr.update(value=""),
         inputs=None, outputs=s3_audio,
     ).then(
         on_confirm, inputs=[state], outputs=_confirm_outputs, show_progress="hidden",
+    ).then(
+        lambda st: _nav(st, st.get("screen", "S3")), inputs=[state], outputs=[screen_nav],
+    ).then(
+        fn=None, js=COMBINED_JS, inputs=[screen_nav, phase_nav],
+    ).then(
+        fn=None, js=WATCHDOG_JS,
+    )
+
+    # 재생 종료 이벤트 → 다음 교환 또는 라운드 결과로 진행
+    btn_audio_done.click(
+        on_audio_done, inputs=[state], outputs=_confirm_outputs, show_progress="hidden",
     ).then(
         lambda st: _nav(st, st.get("screen", "S3")), inputs=[state], outputs=[screen_nav],
     ).then(
@@ -3309,7 +3838,7 @@ with gr.Blocks(title="RespondAI") as app:
         st["exchange"] = 1
         st["exchange_log"] = []
         st["ai_notes"] = []
-        st["current_notes"] = []
+        reset_note_input(st)
         st["phase"] = "user_input"
         st["key"] = random.choice(KEYS)
         st["bpm"] = random.choice(BPM_CHOICES)
