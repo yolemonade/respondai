@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import random
 import time
 import wave as _wave
@@ -46,7 +47,18 @@ DEFAULT_DURATION = 2   # sixteenth-note steps per note slot
 TOTAL_ROUNDS   = 2  # 테스트용 (발표 전 5로 복원) — MAX_EXCHANGES=3 고정
 AI_MODE        = "model"
 
-CHECKPOINT_PATH = "checkpoints/best_inference.pt"
+def _get_checkpoint_path() -> str:
+    local = "checkpoints/best_inference.pt"
+    if os.path.exists(local):
+        return local
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(
+        repo_id="uuyeong/respondai-model",
+        filename="best_inference.pt",
+        local_dir="checkpoints",
+    )
+
+CHECKPOINT_PATH = _get_checkpoint_path()
 
 SAMPLE_RATE    = 22050
 
@@ -1684,11 +1696,11 @@ def s5_html(state: dict) -> str:
     def _gauge(icon, label, desc, value, color, hint):
         pct = min(100, int(value / 300 * 100))
         hint_html = (
-            f'<div class="s5-gauge-hint">💡 {hint}</div>' if pct < 50 and hint else ""
+            f'<div class="s5-gauge-hint">{hint}</div>' if pct < 50 and hint else ""
         )
         return (
             f'<div class="s5-gauge">'
-            f'<div class="s5-gauge-head"><span>{icon} {label}</span><span>{pct}%</span></div>'
+            f'<div class="s5-gauge-head"><span>{label}</span><span>{pct}%</span></div>'
             f'<div class="s5-gauge-desc">{desc}</div>'
             f'<div class="s5-gauge-track"><div class="s5-gauge-fill" style="width:{pct}%;background:{color};"></div></div>'
             f'{hint_html}'
@@ -1696,13 +1708,13 @@ def s5_html(state: dict) -> str:
         )
 
     gauges = (
-        _gauge("🎵", "조성 일관성", "라운드의 Key 스케일 안에서 연주한 비율",
+        _gauge("", "조성 일관성", "라운드의 Key 스케일 안에서 연주한 비율",
                _avg("key_consistency"), "#7B9FD4",
                "다음엔 Key 스케일 안의 음 위주로 연주해보세요")
-        + _gauge("🥁", "리듬 호응", "AI의 리듬 패턴에 얼마나 맞춰 응답했는가",
+        + _gauge("", "리듬 호응", "AI의 리듬 패턴에 얼마나 맞춰 응답했는가",
                  _avg("rhythm_similarity"), "#6FBF8F",
                  "AI 응답의 박자감을 다음 입력에 반영해보세요")
-        + _gauge("🔁", "모티프 활용", "첫 라운드 멜로디를 얼마나 기억하고 활용했는가",
+        + _gauge("", "모티프 활용", "첫 라운드 멜로디를 얼마나 기억하고 활용했는가",
                  _avg("motif_usage"), "#9B8FD4",
                  "1라운드 첫 멜로디를 다시 사용해보세요")
     )
@@ -1735,6 +1747,45 @@ def s5_html(state: dict) -> str:
 
 APP_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500&display=swap');
+
+/* 흰색 배경 위 연한 회색 글씨 → 어둡게 강제 */
+.gradio-container label,
+.gradio-container label span,
+.gradio-container legend,
+.gradio-container fieldset > span,
+.gradio-container .label-wrap,
+.gradio-container .label-wrap span,
+.gradio-container [class*="label"],
+.gradio-container span.text-sm,
+.gradio-container span.text-xs,
+.gradio-container .caption-lg,
+.gradio-container .gap > span,
+.gradio-container .wrap > span,
+.gradio-container p,
+.gradio-container .prose p,
+.gradio-container .block > span {
+  color: #1A1A2E !important;
+}
+/* 마이크/오디오 컴포넌트 — 내부 모든 텍스트 어둡게 */
+#s3-mic-input *,
+#s3-mic-input,
+.s3-mic-host *,
+.s3-mic-host {
+  color: #1A1A2E !important;
+}
+/* Gradio Audio 컴포넌트 내부 select/option/button */
+.gradio-container select,
+.gradio-container select option,
+.gradio-container option,
+.gradio-container [class*="select"] span,
+.gradio-container [class*="dropdown"] span,
+.gradio-container [class*="device"] span,
+.gradio-container [class*="audio"] *,
+.gradio-container [class*="waveform"] *,
+.gradio-container [class*="microphone"] * {
+  color: #1A1A2E !important;
+}
+
 
 /* 화면 밖 숨김 버튼 (audio onended 브리지) — display:none 이면 일부 환경에서
    programmatic click 이 무시되므로 위치만 밖으로 뺀다. */
@@ -2956,7 +3007,13 @@ def _result_panel_updates(st: dict):
     return gr.update(), gr.update(), gr.update()
 
 
-with gr.Blocks(title="RespondAI") as app:
+_GR_MAJOR = int(gr.__version__.split(".")[0])
+_blocks_kwargs = {"title": "RespondAI"}
+if _GR_MAJOR < 6:
+    _blocks_kwargs["css"] = APP_CSS
+    _blocks_kwargs["js"] = KEYBOARD_JS
+
+with gr.Blocks(**_blocks_kwargs) as app:
     state = gr.State(init_state())
 
     with gr.Column(visible=True, elem_classes=["game-stage"]):
@@ -3887,4 +3944,10 @@ with gr.Blocks(title="RespondAI") as app:
 
 
 if __name__ == "__main__":
-    app.launch(share=False, css=APP_CSS, js=KEYBOARD_JS)
+    server_name = os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1")
+    server_port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
+    launch_kwargs: dict = {"share": False, "server_name": server_name, "server_port": server_port}
+    if _GR_MAJOR >= 6:
+        launch_kwargs["css"] = APP_CSS
+        launch_kwargs["js"] = KEYBOARD_JS
+    app.launch(**launch_kwargs)
