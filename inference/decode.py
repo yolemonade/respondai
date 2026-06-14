@@ -21,6 +21,8 @@ from typing import List, Optional, Sequence
 
 import numpy as np
 import pretty_midi
+import time
+
 
 from data.tokenizer import STEPS_PER_BAR, Note, Tokenizer
 
@@ -73,7 +75,10 @@ def notes_to_wav(
     path explicitly.
     """
     pm = notes_to_pretty_midi(notes, tempo=tempo)
+    t_audio = time.time()
+
     audio = pm.fluidsynth(fs=sample_rate, sf2_path=sound_font) if sound_font else pm.fluidsynth(fs=sample_rate)
+    print("fluidsynth:", time.time() - t_audio)
     # pretty_midi returns float64; downcast for size.
     return audio.astype(np.float32)
 
