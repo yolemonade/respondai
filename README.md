@@ -1,3 +1,14 @@
+---
+title: RespondAI
+emoji: 🎹
+colorFrom: purple
+colorTo: blue
+sdk: gradio
+sdk_version: "5.33.0"
+app_file: app.py
+pinned: false
+---
+
 # RespondAI — Call-and-Response Improv Game
 
 A small Decoder-only Transformer that answers your 4-bar melody with its own,
