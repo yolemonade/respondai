@@ -128,18 +128,17 @@ def score_response(
     rhythm_score = int(round(rs_clamped * 300))
 
     # --- motif usage ------------------------------------------------------
-    mo = motif_overlap_weighted(call_notes, response_notes, n=3)  # 0..1
-    motif_score = int(round(mo * 300))
+    # n=2 (단일 인터벌) 로 느슨하게 매칭 + sqrt 커브로 낮은 점수 구간 부스트
+    mo = motif_overlap_weighted(call_notes, response_notes, n=2)  # 0..1
+    motif_score = int(round(mo ** 0.5 * 300))
 
     # --- creativity bonus -------------------------------------------------
-    # Reward responses that are recognisably related (motif >= 0.15) but not
-    # mere transposed copies (motif <= 0.85). Peak at motif ~ 0.45.
-    if 0.15 <= mo <= 0.85:
-        # Triangular shape, peaking at 0.45.
+    # 문턱을 0.03으로 낮추고 구간을 넓혀 0이 나오는 경우를 줄임
+    if 0.03 <= mo <= 0.97:
         if mo <= 0.45:
-            tri = (mo - 0.15) / (0.45 - 0.15)
+            tri = (mo - 0.03) / (0.45 - 0.03)
         else:
-            tri = (0.85 - mo) / (0.85 - 0.45)
+            tri = (0.97 - mo) / (0.97 - 0.45)
         creativity = int(round(max(0.0, tri) * 100))
     else:
         creativity = 0

@@ -1,0 +1,16 @@
+[Unit]
+Description=RespondAI Gradio App
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=__HOME__/respondai
+ExecStart=__HOME__/respondai/venv/bin/python app.py
+Restart=always
+RestartSec=10
+Environment=GRADIO_SERVER_NAME=0.0.0.0
+Environment=GRADIO_SERVER_PORT=7860
+
+[Install]
+WantedBy=multi-user.target
