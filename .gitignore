@@ -34,3 +34,31 @@ prompt.md
 docs/FRONTEND.md
 docs/GAMERULE.md
 docs/PLAN.md
+.venv/
+__pycache__/
+*.pyc
+
+# Local environments and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Local patch backups
+backups/
+.last_humming_*
+app.py.before_*
+input/*.before_*
+*.zip
+*.tar.gz
+
+# Local v4 backups
+backups/
+.last_humming_*
+app.py.before_*
+input/*.before_*
+requirements.txt.before_*
+*.zip
+*.tar.gz
+.venv/
+__pycache__/
+*.pyc

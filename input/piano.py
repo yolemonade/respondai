@@ -53,7 +53,12 @@ def _midi_to_hz(pitch: int) -> float:
 
 def _stable_seed(notes: List[Note], role: str) -> int:
     """Build a deterministic seed so the same phrase keeps the same feel."""
-    role_offset = 17 if role == "ai" else 5
+    role_offset = {
+        "user": 5,
+        "ai": 17,
+        "bass": 29,
+        "comp": 41,
+    }.get(role, 5)
     value = role_offset
     for index, note in enumerate(notes):
         value += (
@@ -94,11 +99,27 @@ def _velocity_gain(
     note_count: int,
     role: str,
 ) -> float:
-    """Create simple beat accents and phrase shaping."""
+    """멜로디에는 표현을 주고, 반주는 일정한 볼륨을 유지한다."""
     beat_position = int(note.start) % 16
-    gain = 0.64 if role == "ai" else 0.60
 
-    # Downbeat and secondary accents.
+    if role == "bass":
+        gain = 0.70
+        if beat_position == 0:
+            gain += 0.045
+        elif beat_position == 8:
+            gain += 0.020
+        return float(np.clip(gain, 0.58, 0.78))
+
+    if role == "comp":
+        gain = 0.43
+        if beat_position == 0:
+            gain += 0.025
+        elif beat_position in (2, 6, 10, 14):
+            gain -= 0.018
+        return float(np.clip(gain, 0.34, 0.50))
+
+    gain = 0.66 if role == "ai" else 0.60
+
     if beat_position == 0:
         gain += 0.16
     elif beat_position == 8:
@@ -108,15 +129,13 @@ def _velocity_gain(
     elif beat_position in (2, 6, 10, 14):
         gain -= 0.035
 
-    # Gentle phrase arc.
     if note_count > 1:
         phrase_position = note_index / (note_count - 1)
         arc = 1.0 - abs(phrase_position * 2.0 - 1.0)
-        gain += 0.08 * arc
+        gain += 0.055 * arc
 
-    # AI response may be slightly more present, without overpowering.
     if role == "ai":
-        gain += 0.035
+        gain += 0.045
 
     return float(np.clip(gain, 0.34, 0.96))
 
@@ -129,21 +148,50 @@ def _oscillator_mix(
     """Fast piano/electric-piano-like additive oscillator bank."""
     phase = 2.0 * np.pi * frequency * time_axis
 
-    if role == "ai":
-        # Brighter response timbre.
+    if role == "bass":
+        # 기본음 중심의 두껍고 건조한 베이스.
         signal = (
-            0.48 * np.sin(phase)
-            + 0.25 * np.sin(2.0 * phase + 0.04)
-            + 0.12 * np.sin(3.0 * phase + 0.09)
-            + 0.055 * np.sin(4.0 * phase)
-            + 0.025 * np.sin(5.0 * phase)
+            0.78 * np.sin(phase)
+            + 0.16 * np.sin(2.0 * phase + 0.02)
+            + 0.045 * np.sin(3.0 * phase)
+            + 0.018 * np.sin(4.0 * phase)
         )
-        # Very small detuned component for width/richness in mono.
-        signal += 0.055 * np.sin(
-            2.0 * np.pi * frequency * 1.0035 * time_axis
+
+    elif role == "comp":
+        # 부드러운 전자피아노 계열의 코드 컴핑.
+        signal = (
+            0.43 * np.sin(phase)
+            + 0.23 * np.sin(2.0 * phase + 0.11)
+            + 0.105 * np.sin(3.0 * phase + 0.06)
+            + 0.045 * np.sin(4.0 * phase)
         )
+        signal += 0.065 * np.sin(
+            2.0 * np.pi * frequency * 1.006 * time_axis
+        )
+
+    elif role == "ai":
+        # 밝은 AI 멜로디에 detune과 짧은 hammer 성분을 추가한다.
+        signal = (
+            0.44 * np.sin(phase)
+            + 0.215 * np.sin(2.0 * phase + 0.04)
+            + 0.105 * np.sin(3.0 * phase + 0.09)
+            + 0.048 * np.sin(4.0 * phase)
+            + 0.022 * np.sin(5.0 * phase)
+        )
+        signal += 0.045 * np.sin(
+            2.0 * np.pi * frequency * 0.997 * time_axis
+        )
+        signal += 0.045 * np.sin(
+            2.0 * np.pi * frequency * 1.003 * time_axis
+        )
+        signal += (
+            0.030
+            * np.sin(2.0 * np.pi * frequency * 7.25 * time_axis)
+            * np.exp(-32.0 * time_axis)
+        )
+
     else:
-        # Slightly softer user-preview timbre.
+        # 사용자 미리듣기 음색.
         signal = (
             0.56 * np.sin(phase)
             + 0.22 * np.sin(2.0 * phase + 0.03)
@@ -171,7 +219,12 @@ def _piano_envelope(
         max(1, int(attack_seconds * sample_rate)),
     )
 
-    decay_rate = 3.5 if role == "ai" else 3.9
+    decay_rate = {
+        "ai": 3.15,
+        "user": 3.9,
+        "bass": 1.85,
+        "comp": 2.65,
+    }.get(role, 3.9)
     envelope = (
         0.72 * np.exp(-decay_rate * time_axis / max(duration, 0.04))
         + 0.28 * np.exp(-0.75 * time_axis / max(duration, 0.04))
@@ -208,7 +261,12 @@ def _apply_room(
     if audio.size == 0:
         return audio
 
-    wet = 0.12 if role == "ai" else 0.075
+    wet = {
+        "ai": 0.15,
+        "user": 0.075,
+        "bass": 0.03,
+        "comp": 0.19,
+    }.get(role, 0.075)
     taps = (
         (0.043, 0.48),
         (0.071, 0.28),
@@ -247,7 +305,7 @@ def synth_notes(
     sample_rate:
         Output sample rate.
     role:
-        ``"user"`` or ``"ai"``. It changes timbre and articulation slightly.
+        ``"user"``, ``"ai"``, ``"bass"``, or ``"comp"``.
     tail_sec:
         Extra room for release/reverb.
     swing_amount:
@@ -319,13 +377,25 @@ def synth_notes(
 
         symbolic_duration = (end_step - start_step) * seconds_per_step
 
-        # Repeated/short notes are a little more detached; longer notes connect.
-        if symbolic_duration <= seconds_per_step:
-            gate_ratio = 0.78 if role == "ai" else 0.84
+        # 역할별 articulation.
+        if role == "bass":
+            gate_ratio = (
+                0.88
+                if symbolic_duration <= 2.0 * seconds_per_step
+                else 0.94
+            )
+        elif role == "comp":
+            gate_ratio = (
+                0.72
+                if symbolic_duration <= seconds_per_step
+                else 0.84
+            )
+        elif symbolic_duration <= seconds_per_step:
+            gate_ratio = 0.80 if role == "ai" else 0.84
         elif symbolic_duration <= 2.0 * seconds_per_step:
-            gate_ratio = 0.86 if role == "ai" else 0.90
+            gate_ratio = 0.88 if role == "ai" else 0.90
         else:
-            gate_ratio = 0.93 if role == "ai" else 0.95
+            gate_ratio = 0.94 if role == "ai" else 0.95
 
         duration = max(0.025, symbolic_duration * gate_ratio)
         sample_count = max(1, int(duration * sample_rate))
@@ -380,6 +450,12 @@ def synth_notes(
     peak = float(np.max(np.abs(audio))) if audio.size else 0.0
 
     if peak > 1e-6:
-        audio = audio / peak * 0.88
+        target_peak = {
+            "user": 0.86,
+            "ai": 0.88,
+            "bass": 0.68,
+            "comp": 0.50,
+        }.get(role, 0.86)
+        audio = audio / peak * target_peak
 
     return audio.astype(np.float32, copy=False)
