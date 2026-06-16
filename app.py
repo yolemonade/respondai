@@ -2470,10 +2470,10 @@ def s5_html(state: dict) -> str:
                _avg("key_consistency"), "#7B9FD4",
                "다음엔 Key 스케일 안의 음 위주로 연주해보세요")
         + _gauge("", "리듬 호응", "AI의 리듬 패턴에 얼마나 맞춰 응답했는가",
-                 _avg("rhythm_similarity"), "#6FBF8F",
+                 _avg("rhythm_similarity"), "#7B9FD4",
                  "AI 응답의 박자감을 다음 입력에 반영해보세요")
         + _gauge("", "모티프 활용", "첫 라운드 멜로디를 얼마나 기억하고 활용했는가",
-                 _avg("motif_usage"), "#9B8FD4",
+                 _avg("motif_usage"), "#7B9FD4",
                  "1라운드 첫 멜로디를 다시 사용해보세요")
     )
 
