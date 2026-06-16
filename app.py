@@ -947,6 +947,19 @@ def _event_cursor(events: List[dict]) -> int:
 
 # ─── Scoring ─────────────────────────────────────────────────────────────────
 
+def _note_count_scale(n: int) -> float:
+    """입력 음 개수에 따른 스케일 팩터 — 짧은 입력은 낮게, 충분한 입력은 만점 허용."""
+    if n <= 0: return 0.0
+    if n == 1: return 0.08
+    if n == 2: return 0.20
+    if n == 3: return 0.38
+    if n == 4: return 0.55
+    if n == 5: return 0.68
+    if n <= 7: return 0.80
+    if n <= 9: return 0.92
+    return 1.0
+
+
 def compute_exchange_score(
     user_notes: List[Note],
     ai_prev_notes: List[Note],
@@ -964,52 +977,55 @@ def compute_exchange_score(
             "raw": {"key_consistency": 0.0, "rhythm_pearson": 0.0, "motif_overlap": 0.0},
         }
 
+    scale = _note_count_scale(len(user_notes))
+
     # R1/E1: auto 300 for rhythm + motif; only key computed
     if round_num == 1 and exchange_num == 1:
         kc = int(key_consistency(user_notes, key_token) * 300)
-        cb = 50
+        rhythm_score = int(300 * scale)
+        motif_score  = int(300 * scale)
+        cb = int(50 * scale)
         return {
-            "key_consistency": kc, "rhythm_similarity": 300,
-            "motif_usage": 300, "creativity_bonus": cb,
-            "total": kc + 300 + 300 + cb,
+            "key_consistency": kc, "rhythm_similarity": rhythm_score,
+            "motif_usage": motif_score, "creativity_bonus": cb,
+            "total": kc + rhythm_score + motif_score + cb,
             "feedback": "Motif saved as your reference.",
-            "raw": {"key_consistency": kc / 300, "rhythm_pearson": 1.0, "motif_overlap": 1.0},
+            "raw": {"key_consistency": kc / 300, "rhythm_pearson": scale, "motif_overlap": scale},
         }
 
-    # Rhythm: compare previous AI notes (or 300 auto if E1)
+    # Rhythm: compare previous AI notes (or scaled auto if E1)
     if exchange_num == 1 or not ai_prev_notes:
-        rhythm_score = 300
-        rhythm_raw = 1.0
+        rhythm_score = int(300 * scale)
+        rhythm_raw = scale
     else:
         tmp = score_response(ai_prev_notes, user_notes, key_token)
-        rhythm_score = tmp["rhythm_similarity"]
+        rhythm_score = int(tmp["rhythm_similarity"] * scale)
         rhythm_raw = tmp["raw"]["rhythm_pearson"]
 
-    # Key consistency: always computable
+    # Key consistency: always computable (not scaled — pitch choices always count)
     base = score_response(ai_prev_notes or user_notes, user_notes, key_token)
     key_score = base["key_consistency"]
 
     # Creativity: comparing user vs AI-prev; auto-award if no AI response yet
     if not ai_prev_notes or exchange_num == 1:
-        creativity = 50
+        creativity = int(50 * scale)
     else:
-        creativity = base["creativity_bonus"]
+        creativity = int(base["creativity_bonus"] * scale)
 
     # Motif: compare against r1_motif (or ai_prev if no motif yet)
-    # r1_motif needs ≥3 notes to form n-grams (n=3 → 2 intervals); auto-300 if too short
+    # r1_motif needs ≥3 notes to form n-grams (n=3 → 2 intervals); scaled auto if too short
     if r1_motif and len(r1_motif) >= 3:
         motif_res = score_response(r1_motif, user_notes, key_token)
-        motif_score = motif_res["motif_usage"]
+        motif_score = int(motif_res["motif_usage"] * scale)
         motif_raw = motif_res["raw"]["motif_overlap"]
     elif r1_motif and len(r1_motif) < 3:
-        # Motif too short to score — award full to avoid penalising player unfairly
-        motif_score = 300
-        motif_raw = 1.0
+        motif_score = int(300 * scale)
+        motif_raw = scale
     else:
-        motif_score = base["motif_usage"]
+        motif_score = int(base["motif_usage"] * scale)
         motif_raw = base["raw"]["motif_overlap"]
 
-    print(f"[SCORE] R{round_num}/E{exchange_num} | key={key_score} rhythm={rhythm_score} motif={motif_score} creativity={creativity} | r1_motif_len={len(r1_motif)} user_len={len(user_notes)} ai_prev_len={len(ai_prev_notes)} | motif_raw={motif_raw:.3f}")
+    print(f"[SCORE] R{round_num}/E{exchange_num} | scale={scale:.2f} key={key_score} rhythm={rhythm_score} motif={motif_score} creativity={creativity} | r1_motif_len={len(r1_motif)} user_len={len(user_notes)} ai_prev_len={len(ai_prev_notes)} | motif_raw={motif_raw:.3f}")
 
     total = key_score + rhythm_score + motif_score + creativity
 
@@ -2508,24 +2524,85 @@ APP_CSS = """
 .gradio-container .block > span {
   color: #1A1A2E !important;
 }
-/* 마이크/오디오 컴포넌트 — 내부 모든 텍스트 어둡게 */
-#s3-mic-input *,
-#s3-mic-input,
-.s3-mic-host *,
-.s3-mic-host {
+/* 마이크/오디오 컴포넌트 — 라이트 패널(S1/S2)에서만 어둡게 */
+.panel-s1 #s3-mic-input *,
+.panel-s1 #s3-mic-input,
+.panel-s1 .s3-mic-host *,
+.panel-s1 .s3-mic-host,
+.panel-s2 #s3-mic-input *,
+.panel-s2 #s3-mic-input,
+.panel-s2 .s3-mic-host *,
+.panel-s2 .s3-mic-host {
   color: #1A1A2E !important;
 }
-/* Gradio Audio 컴포넌트 내부 select/option/button */
-.gradio-container select,
-.gradio-container select option,
-.gradio-container option,
-.gradio-container [class*="select"] span,
-.gradio-container [class*="dropdown"] span,
-.gradio-container [class*="device"] span,
-.gradio-container [class*="audio"] *,
-.gradio-container [class*="waveform"] *,
-.gradio-container [class*="microphone"] * {
+/* Gradio Audio 컴포넌트 내부 select/option/button — 라이트 패널 한정 */
+.panel-s1 select, .panel-s2 select,
+.panel-s1 select option, .panel-s2 select option,
+.panel-s1 option, .panel-s2 option,
+.panel-s1 [class*="select"] span, .panel-s2 [class*="select"] span,
+.panel-s1 [class*="dropdown"] span, .panel-s2 [class*="dropdown"] span,
+.panel-s1 [class*="device"] span, .panel-s2 [class*="device"] span,
+.panel-s1 [class*="audio"] *, .panel-s2 [class*="audio"] *,
+.panel-s1 [class*="waveform"] *, .panel-s2 [class*="waveform"] *,
+.panel-s1 [class*="microphone"] *, .panel-s2 [class*="microphone"] * {
   color: #1A1A2E !important;
+}
+
+/* ── S3 다크 패널 — 모든 텍스트/레이블 흰색 강제 ──────────────────── */
+/* 전역 #1A1A2E important를 같은 specificity로 덮으려면 panel-s3 prefix 사용 */
+.panel-s3 label,
+.panel-s3 label span,
+.panel-s3 legend,
+.panel-s3 fieldset > span,
+.panel-s3 .label-wrap,
+.panel-s3 .label-wrap span,
+.panel-s3 [class*="label"],
+.panel-s3 span.text-sm,
+.panel-s3 span.text-xs,
+.panel-s3 .caption-lg,
+.panel-s3 .gap > span,
+.panel-s3 .wrap > span,
+.panel-s3 p,
+.panel-s3 .prose p,
+.panel-s3 .block > span {
+  color: #F0F0F0 !important;
+}
+/* Note length Radio 박스 — 다크 배경 + 흰 글씨 (라이트 모드에서도 강제) */
+.panel-s3 .rhythm-input-controls,
+.panel-s3 .rhythm-input-controls * {
+  background: #1C1C1C !important;
+  color: #F0F0F0 !important;
+}
+/* Radio 선택 원형 인디케이터는 배경 투명 유지 */
+.panel-s3 .rhythm-input-controls input[type="radio"] {
+  background: transparent !important;
+  accent-color: #9B8FD4;
+}
+.panel-s3 .s3-mic-host,
+.panel-s3 .s3-mic-host *,
+#s3-mic-host,
+#s3-mic-host * {
+  background-color: #1C1C1C !important;
+  color: #F0F0F0 !important;
+}
+.panel-s3 .s3-mic-host button,
+#s3-mic-host button {
+  background: #2A2A3A !important;
+  color: #F0F0F0 !important;
+  border: 1px solid rgba(255,255,255,0.18) !important;
+}
+/* Audio 내부 타임코드·select·waveform — 다크 패널 흰색 */
+.panel-s3 select,
+.panel-s3 select option,
+.panel-s3 option,
+.panel-s3 [class*="select"] span,
+.panel-s3 [class*="dropdown"] span,
+.panel-s3 [class*="device"] span,
+.panel-s3 [class*="audio"] *,
+.panel-s3 [class*="waveform"] *,
+.panel-s3 [class*="microphone"] * {
+  background-color: #1C1C1C !important;
+  color: #F0F0F0 !important;
 }
 
 
