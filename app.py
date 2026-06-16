@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import random
 import time
@@ -29,7 +30,7 @@ import gradio as gr
 from data.tokenizer import Note, STEPS_PER_BAR, PITCH_MIN, PITCH_MAX
 from analysis.scoring import score_response, session_summary, key_consistency, grade_from_total
 from input.piano import synth_notes, mock_ai_response
-from input.humming import humming_to_notes
+from input.humming_robust import humming_to_notes
 from inference.generate import load_model_for_inference, generate_candidates
 from analysis.rhythm import rhythm_similarity
 from analysis.motif import motif_overlap
@@ -38,6 +39,7 @@ from analysis.motif import motif_overlap
 from input.jazz_backing import (
     build_round_audio as build_jazz_round_audio,
 )
+from input.fluid_band import build_browser_piano_sample_bank
 
 # ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -86,7 +88,7 @@ EXCHANGE_STEPS = (MAX_NOTES * DEFAULT_DURATION) + 8   # x-width per exchange slo
 
 # AI 응답 길이: 유저 입력에 맞추되 재생은 AI_RESPONSE_MAX_SEC 로 상한
 AI_MAX_BARS_CAP = 2
-AI_RESPONSE_MAX_SEC = 4.0
+AI_RESPONSE_MAX_SEC = 8.0
 AI_MAX_NOTES_EMPTY = 4
 
 # 피아노 입력 타임라인 상한: 최대 2마디(16분음표 그리드)
@@ -96,6 +98,27 @@ INPUT_MAX_STEPS = AI_MAX_BARS_CAP * STEPS_PER_BAR
 KB_WHITE_SEMIS = [0, 2, 4, 5, 7, 9, 11, 12, 14]          # C4..D5
 KB_BLACK_SEMIS = [1, 3, 6, 8, 10, 13, 15, 18]            # C#4..F#5
 KB_ALLOWED_MIDIS = sorted({60 + s for s in (KB_WHITE_SEMIS + KB_BLACK_SEMIS)})
+
+try:
+    _BROWSER_PIANO_SAMPLES = build_browser_piano_sample_bank(
+        KB_ALLOWED_MIDIS,
+        sample_rate=SAMPLE_RATE,
+    )
+    print(
+        f"[AUDIO] Browser piano sample bank ready "
+        f"({len(_BROWSER_PIANO_SAMPLES)} notes)"
+    )
+except Exception as exc:
+    _BROWSER_PIANO_SAMPLES = {}
+    print(
+        "[AUDIO] Browser piano sample bank unavailable; "
+        f"keyboard will use oscillator fallback: {exc}"
+    )
+
+_BROWSER_PIANO_SAMPLES_JSON = json.dumps(
+    _BROWSER_PIANO_SAMPLES,
+    ensure_ascii=True,
+)
 
 # 건반 위에 표시할 키보드 단축키 레이블 (영문/한글)
 # 흰 a(60) s(62) d(64) f(65) g(67) h(69) j(71) k(72) l(74)
@@ -113,8 +136,13 @@ def _step_sec(bpm: int) -> float:
 
 
 def ai_timeline_cap_steps(bpm: int) -> int:
-    """AI 노트 타임라인 상한(16분음표 스텝) — 약 4초."""
-    return max(4, int(AI_RESPONSE_MAX_SEC / _step_sec(bpm)))
+    """AI가 사용자와 동일한 최대 2마디 타임라인을 사용하도록 한다.
+
+    고정 4초 제한은 70 BPM에서 약 18 step에 불과해,
+    최대 32 step인 사용자 구간을 AI가 채우지 못했다.
+    """
+    del bpm
+    return AI_MAX_BARS_CAP * STEPS_PER_BAR
 
 
 def _user_time_span(user_notes: List[Note]) -> int:
@@ -130,7 +158,7 @@ def generation_limits(user_notes: List[Note]) -> tuple[int, int]:
     span = _user_time_span(user_notes)
     user_bars = max(1, (span + STEPS_PER_BAR - 1) // STEPS_PER_BAR)
     max_bars = max(1, min(AI_MAX_BARS_CAP, user_bars))
-    max_new_tokens = min(80, 20 + len(user_notes) * 8)
+    max_new_tokens = min(64, 18 + len(user_notes) * 6)
     return max_bars, max_new_tokens
 
 
@@ -177,39 +205,357 @@ def trim_note_timeline(
     return out
 
 
+def _key_pitch_classes(key_token: str) -> set[int]:
+    roots = {
+        "C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
+        "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11,
+    }
+    is_minor = bool(key_token and key_token.endswith("m"))
+    root_name = key_token[:-1] if is_minor else key_token
+    root = roots.get(root_name, 0)
+    intervals = (0, 2, 3, 5, 7, 8, 10) if is_minor else (0, 2, 4, 5, 7, 9, 11)
+    return {(root + interval) % 12 for interval in intervals}
+
+
+def _nearest_scale_pitch(pitch: int, key_token: str) -> int:
+    pcs = _key_pitch_classes(key_token)
+    candidates = [
+        value
+        for value in range(int(pitch) - 3, int(pitch) + 4)
+        if value % 12 in pcs
+    ]
+    return min(candidates, key=lambda value: abs(value - pitch)) if candidates else int(pitch)
+
+
+def _repair_ai_phrase(
+    notes: List[Note],
+    user_notes: List[Note],
+    key_token: str,
+    max_span: int,
+) -> List[Note]:
+    """Repair obvious model artifacts without stretching the rhythm."""
+    if not notes:
+        return []
+
+    ordered = sorted(notes, key=lambda note: (note.start, note.end, note.pitch))
+    origin = ordered[0].start
+    center = int(round(np.median([note.pitch for note in user_notes]))) if user_notes else 64
+    low = max(PITCH_MIN, center - 10)
+    high = min(PITCH_MAX, center + 14)
+
+    result: List[Note] = []
+    previous_pitch: Optional[int] = None
+    seen = set()
+
+    for note in ordered:
+        start = int(note.start - origin)
+        end = int(note.end - origin)
+        if start >= max_span:
+            break
+        end = min(max_span, end)
+        if end <= start:
+            continue
+
+        key = (start, int(note.pitch))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        pitch = _nearest_scale_pitch(int(note.pitch), key_token)
+        while pitch < low:
+            pitch += 12
+        while pitch > high:
+            pitch -= 12
+
+        if previous_pitch is not None and abs(pitch - previous_pitch) > 10:
+            octave_options = [pitch - 12, pitch, pitch + 12]
+            octave_options = [p for p in octave_options if low <= p <= high]
+            if octave_options:
+                pitch = min(octave_options, key=lambda p: abs(p - previous_pitch))
+
+        duration = max(1, min(6, end - start))
+        result.append(Note(pitch=pitch, start=start, end=min(max_span, start + duration)))
+        previous_pitch = pitch
+
+    # Resolve overlaps while preserving rests.
+    repaired: List[Note] = []
+    for note in result:
+        if repaired and note.start < repaired[-1].end:
+            prev = repaired[-1]
+            repaired[-1] = Note(prev.pitch, prev.start, max(prev.start + 1, note.start))
+        repaired.append(note)
+
+    # End on a stable chord tone near the generated final pitch.
+    if repaired:
+        roots = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
+                 "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11}
+        is_minor = key_token.endswith("m")
+        root = roots.get(key_token[:-1] if is_minor else key_token, 0)
+        stable_pcs = {(root + interval) % 12 for interval in ((0, 3, 7) if is_minor else (0, 4, 7))}
+        last = repaired[-1]
+        candidates = [p for p in range(last.pitch - 5, last.pitch + 6) if p % 12 in stable_pcs]
+        if candidates:
+            repaired[-1] = Note(min(candidates, key=lambda p: abs(p - last.pitch)), last.start, last.end)
+
+    return _relax_ai_rhythm(
+        repaired,
+        user_notes,
+        max_span,
+    )
+
+
+
+def _relax_ai_rhythm(
+    notes: List[Note],
+    user_notes: List[Note],
+    max_span: int,
+) -> List[Note]:
+    """AI를 성긴 8분음표 중심 프레이즈로 정리해 swing이 들리게 한다."""
+    if not notes:
+        return []
+
+    ordered = sorted(
+        notes,
+        key=lambda note: (note.start, note.end, note.pitch),
+    )
+
+    user_count = max(1, len(user_notes))
+    target_count = min(
+        len(ordered),
+        max(
+            4,
+            min(
+                10,
+                int(round(user_count * 0.68)),
+            ),
+        ),
+    )
+
+    if len(ordered) > target_count:
+        indices = (
+            np.linspace(
+                0,
+                len(ordered) - 1,
+                target_count,
+            )
+            .round()
+            .astype(int)
+        )
+        ordered = [ordered[index] for index in indices]
+
+    source_end = max(note.end for note in ordered)
+    desired_end = min(
+        max_span,
+        max(
+            STEPS_PER_BAR,
+            max(
+                (note.end for note in user_notes),
+                default=STEPS_PER_BAR,
+            ),
+        ),
+    )
+
+    # 너무 짧고 급한 프레이즈만 제한적으로 늘린다.
+    scale = 1.0
+    if source_end > 0 and source_end < desired_end:
+        scale = min(
+            1.55,
+            desired_end / source_end,
+        )
+
+    result: List[Note] = []
+    previous_start = -2
+
+    for index, note in enumerate(ordered):
+        raw_start = int(round(note.start * scale))
+
+        # 8분음표 grid. start % 4 == 2인 음이 실제 swing delay를 받는다.
+        start = int(round(raw_start / 2.0)) * 2
+        start = max(
+            previous_start + 2,
+            start,
+        )
+
+        # 세 음마다 한 번씩 짧은 숨을 확보한다.
+        if index > 0 and index % 3 == 0:
+            start += 2
+
+        if start >= max_span:
+            break
+
+        source_duration = max(
+            1,
+            note.end - note.start,
+        )
+        duration = max(
+            2,
+            min(
+                4,
+                int(round(source_duration * min(scale, 1.25))),
+            ),
+        )
+        end = min(
+            max_span,
+            start + duration,
+        )
+
+        if end <= start:
+            continue
+
+        result.append(
+            Note(
+                note.pitch,
+                start,
+                end,
+            )
+        )
+        previous_start = start
+
+    return result
+
 def fit_ai_response_to_user(
     ai_notes: List[Note],
     user_notes: List[Note],
     bpm: int,
+    key_token: str = "C",
 ) -> List[Note]:
+    """Keep the model's natural rhythm; only clip and repair obvious artifacts."""
     if not ai_notes:
         return []
 
     cap_steps = ai_timeline_cap_steps(bpm)
-    user_span = (
-        max(n.end for n in user_notes)
+    user_span = max((note.end for note in user_notes), default=STEPS_PER_BAR)
+    max_span = min(cap_steps, max(STEPS_PER_BAR, user_span + 4))
+    max_notes = (
+        min(
+            10,
+            max(
+                4,
+                int(round(len(user_notes) * 0.72)),
+            ),
+        )
         if user_notes
-        else cap_steps // 2
+        else AI_MAX_NOTES_EMPTY
     )
 
-    if user_notes:
-        max_notes = min(
-            MAX_NOTES,
-            max(6, len(user_notes) + 4),
-        )
-        max_span = min(
-            user_span + 8,
-            cap_steps,
-        )
-    else:
-        max_notes = AI_MAX_NOTES_EMPTY
-        max_span = cap_steps
+    trimmed = trim_note_timeline(ai_notes, max_span=max_span, max_notes=max_notes)
+    return _repair_ai_phrase(trimmed, user_notes, key_token, max_span)
 
-    return trim_note_timeline(
-        ai_notes,
-        max_span=max_span,
-        max_notes=max_notes,
+
+
+def _chord_tone_pitch_classes(key_token: str) -> set[int]:
+    roots = {
+        "C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
+        "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11,
+    }
+    is_minor = bool(key_token and key_token.endswith("m"))
+    root_name = key_token[:-1] if is_minor else key_token
+    root = roots.get(root_name, 0)
+    intervals = (0, 3, 7) if is_minor else (0, 4, 7)
+    return {(root + interval) % 12 for interval in intervals}
+
+
+def _nearest_pitch_from_classes(
+    pitch: int,
+    pitch_classes: set[int],
+    *,
+    radius: int = 6,
+) -> int:
+    candidates = [
+        value
+        for value in range(int(pitch) - radius, int(pitch) + radius + 1)
+        if value % 12 in pitch_classes
+    ]
+    if not candidates:
+        return int(pitch)
+    return min(candidates, key=lambda value: (abs(value - pitch), value))
+
+
+def _select_motif_notes(user_notes: List[Note], limit: int = 8) -> List[Note]:
+    ordered = sorted(user_notes, key=lambda note: (note.start, note.end, note.pitch))
+    if len(ordered) <= limit:
+        return ordered
+    # 최근 프레이즈를 우선 사용하되 너무 촘촘하면 균등 샘플링한다.
+    recent = ordered[-min(len(ordered), limit * 2):]
+    indices = np.linspace(0, len(recent) - 1, limit).round().astype(int)
+    return [recent[index] for index in indices]
+
+
+def _build_musical_response_candidates(
+    user_notes: List[Note],
+    key_token: str,
+) -> List[List[Note]]:
+    """모델 후보가 무너질 때도 음악적인 하한을 보장하는 모티프 변형 후보."""
+    motif = _select_motif_notes(user_notes, limit=8)
+    if len(motif) < 2:
+        return []
+
+    origin = motif[0].start
+    scale_pcs = _key_pitch_classes(key_token)
+    chord_pcs = _chord_tone_pitch_classes(key_token)
+    center = int(round(np.median([note.pitch for note in user_notes])))
+    candidates: List[List[Note]] = []
+
+    variants = (
+        ("sequence_up", 3),
+        ("sequence_down", -3),
+        ("contour_answer", 0),
     )
+
+    for variant_name, shift in variants:
+        phrase: List[Note] = []
+        previous_pitch: Optional[int] = None
+        source_pitches = [note.pitch for note in motif]
+
+        if variant_name == "contour_answer":
+            transformed = [
+                center - (pitch - center)
+                for pitch in source_pitches
+            ]
+        else:
+            transformed = [pitch + shift for pitch in source_pitches]
+
+        for index, (source_note, raw_pitch) in enumerate(zip(motif, transformed)):
+            pitch = _nearest_pitch_from_classes(raw_pitch, scale_pcs, radius=4)
+
+            if previous_pitch is not None:
+                octave_options = [pitch - 12, pitch, pitch + 12]
+                pitch = min(
+                    octave_options,
+                    key=lambda value: (
+                        abs(value - previous_pitch) > 9,
+                        abs(value - previous_pitch),
+                    ),
+                )
+
+            pitch = max(PITCH_MIN, min(PITCH_MAX, pitch))
+            start = int(source_note.start - origin)
+            duration = max(1, min(5, int(source_note.end - source_note.start)))
+
+            # 응답은 원본보다 약간 더 여유 있게 프레이징한다.
+            if index > 0 and index % 3 == 0:
+                start += 1
+
+            phrase.append(Note(pitch, start, start + duration))
+            previous_pitch = pitch
+
+        # 겹침 정리 및 마지막 음을 안정된 화음 구성음으로 해결한다.
+        cleaned: List[Note] = []
+        for note in phrase:
+            if cleaned and note.start < cleaned[-1].end:
+                prev = cleaned[-1]
+                cleaned[-1] = Note(prev.pitch, prev.start, max(prev.start + 1, note.start))
+            cleaned.append(note)
+
+        if cleaned:
+            last = cleaned[-1]
+            cadence_pitch = _nearest_pitch_from_classes(last.pitch, chord_pcs, radius=6)
+            cleaned[-1] = Note(cadence_pitch, last.start, last.end)
+
+        if len(cleaned) >= 3:
+            candidates.append(cleaned)
+
+    return candidates
 
 
 def align_attn_to_notes(attn_scores: List[float], notes: List[Note]) -> List[float]:
@@ -324,79 +670,117 @@ def _jazz_rhythm_score(notes: List[Note]) -> float:
     )
 
 
+def _phrase_musicality(notes: List[Note], key_token: str) -> float:
+    if len(notes) < 3:
+        return -2.0
+
+    ordered = sorted(
+        notes,
+        key=lambda note: (note.start, note.end, note.pitch),
+    )
+    pitches = [note.pitch for note in ordered]
+    intervals = [b - a for a, b in zip(pitches, pitches[1:])]
+    durations = [max(1, note.end - note.start) for note in ordered]
+
+    stepwise = sum(
+        abs(interval) <= 5
+        for interval in intervals
+    ) / max(1, len(intervals))
+
+    harsh_leaps = sum(
+        abs(interval) > 10
+        for interval in intervals
+    ) / max(1, len(intervals))
+
+    repeats = sum(
+        interval == 0
+        for interval in intervals
+    ) / max(1, len(intervals))
+
+    duration_score = min(
+        1.0,
+        len(set(durations)) / 3.0,
+    )
+
+    span = max(
+        1,
+        max(note.end for note in ordered)
+        - min(note.start for note in ordered),
+    )
+    density = len(ordered) / span
+    density_score = max(
+        0.0,
+        1.0 - abs(density - 0.34) / 0.34,
+    )
+
+    offbeat_rate = sum(
+        note.start % 4 == 2
+        for note in ordered
+    ) / len(ordered)
+    swing_score = max(
+        0.0,
+        1.0 - abs(offbeat_rate - 0.35) / 0.35,
+    )
+
+    gaps = [
+        max(0, right.start - left.end)
+        for left, right in zip(ordered, ordered[1:])
+    ]
+    breath_score = min(
+        1.0,
+        sum(gap > 0 for gap in gaps)
+        / max(1, len(gaps))
+        * 1.8,
+    )
+
+    cadence = (
+        1.0
+        if ordered[-1].pitch % 12 in _key_pitch_classes(key_token)
+        else 0.0
+    )
+
+    return (
+        1.15 * stepwise
+        + 0.30 * duration_score
+        + 0.40 * cadence
+        + 0.55 * density_score
+        + 0.45 * swing_score
+        + 0.35 * breath_score
+        - 1.65 * harsh_leaps
+        - 0.85 * repeats
+    )
+
+
 def _rank_candidate(
     cand: List[Note],
     user_notes: List[Note],
     key_token: str,
     previous_ai_notes: Optional[List[Note]] = None,
 ) -> float:
-    if not cand:
-        return -1.0
+    if len(cand) < 3:
+        return -100.0
 
-    key_score = key_consistency(
-        cand,
-        key_token,
-    )
+    key_score = key_consistency(cand, key_token)
+    if key_score < 0.68:
+        return -50.0
 
-    if not user_notes:
-        return (
-            1.5 * key_score
-            + 0.8 * _melodic_variety(cand)
-        )
-
-    rhythm = max(
-        0.0,
-        rhythm_similarity(user_notes, cand),
-    )
-    motif = motif_overlap(
-        user_notes,
-        cand,
-    )
-
-    # 완전히 같은 리듬보다 적당히 관련된 변형을 선호
-    rhythm_relation = _target_score(
-        rhythm,
-        target=0.50,
-        tolerance=0.55,
-    )
-
-    # 모티프도 100% 복사보다 30~50% 활용을 선호
-    motif_relation = _target_score(
-        motif,
-        target=0.40,
-        tolerance=0.40,
-    )
-
-    copy_penalty = _copy_ratio(
-        cand,
-        user_notes,
-    )
+    rhythm = max(0.0, rhythm_similarity(user_notes, cand)) if user_notes else 0.5
+    motif = motif_overlap(user_notes, cand) if user_notes else 0.0
+    copy_penalty = _copy_ratio(cand, user_notes) if user_notes else 0.0
+    length_ratio = len(cand) / max(1, len(user_notes)) if user_notes else 1.0
+    length_score = max(0.0, 1.0 - abs(length_ratio - 0.85) / 0.85)
 
     score = (
-        1.50 * key_score
-        + 0.65 * rhythm_relation
-        + 0.85 * motif_relation
-        + 0.80 * _melodic_variety(cand)
-        + 0.45 * _jazz_rhythm_score(cand)
-        - 1.10 * copy_penalty
+        1.85 * key_score
+        + 1.35 * _phrase_musicality(cand, key_token)
+        + 0.55 * _target_score(rhythm, 0.48, 0.55)
+        + 0.55 * _target_score(motif, 0.35, 0.40)
+        + 0.35 * length_score
+        - 1.25 * copy_penalty
     )
 
-    # 이전 AI 응답과 또 비슷한 결과가 나오는 것도 억제
     if previous_ai_notes:
-        previous_motif = motif_overlap(
-            previous_ai_notes,
-            cand,
-        )
-        previous_rhythm = max(
-            0.0,
-            rhythm_similarity(
-                previous_ai_notes,
-                cand,
-            ),
-        )
-
-        score -= 0.55 * previous_motif
-        score -= 0.25 * previous_rhythm
+        score -= 0.35 * motif_overlap(previous_ai_notes, cand)
 
     return score
 
@@ -422,12 +806,21 @@ def generate_ai_notes(
         max_new_tokens=max_new_tokens,
 
         # 후보마다 안정적 → 모험적인 순서
-        temperature=(0.82, 0.95, 1.08, 1.18),
-        top_p=0.95,
+        temperature=(0.68, 0.76, 0.84, 0.92),
+        top_p=0.84,
 
         # pitch 반복만 완만하게 억제
-        repetition_penalty=1.10,
-        rep_window=8,
+        repetition_penalty=1.04,
+        rep_window=6,
+    )
+
+    # 모델 후보에 규칙 기반 모티프 변형 후보를 더해 품질 하한을 보장한다.
+    candidates = list(candidates)
+    candidates.extend(
+        _build_musical_response_candidates(
+            user_notes,
+            key_token,
+        )
     )
 
     scored = []
@@ -437,6 +830,7 @@ def generate_ai_notes(
             candidate,
             user_notes,
             bpm,
+            key_token,
         )
 
         if not fitted:
@@ -457,26 +851,21 @@ def generate_ai_notes(
             reverse=True,
         )
 
-        # 1등과 2등 차이가 작으면 항상 같은 안전한 후보를
-        # 선택하지 않고 75:25로 선택
-        if (
-            len(scored) >= 2
-            and scored[0][0] - scored[1][0] < 0.25
-        ):
-            chosen = random.choices(
-                scored[:2],
-                weights=[0.75, 0.25],
-                k=1,
-            )[0]
-        else:
-            chosen = scored[0]
+        # 최종 발표 버전은 다양성보다 음악성을 우선해 최고 점수 후보를 사용한다.
+        return scored[0][1], None
 
-        return chosen[1], None
-
+    musical_fallbacks = _build_musical_response_candidates(
+        user_notes,
+        key_token,
+    )
     fallback = (
-        mock_ai_response(user_notes)
-        if user_notes
-        else []
+        musical_fallbacks[0]
+        if musical_fallbacks
+        else (
+            mock_ai_response(user_notes)
+            if user_notes
+            else []
+        )
     )
 
     return (
@@ -484,6 +873,7 @@ def generate_ai_notes(
             fallback,
             user_notes,
             bpm,
+            key_token,
         )
         or fallback,
         None,
@@ -680,7 +1070,14 @@ def estimate_playback_ms(user_notes: List[Note], ai_notes: List[Note], bpm: int)
     return int(sec * 1000)
 
 
-def audio_to_html(audio_tuple, *, notify_done: bool = False, playback_ms: int = 0) -> str:
+def audio_to_html(
+    audio_tuple,
+    *,
+    notify_done: bool = False,
+    playback_ms: int = 0,
+    loop: bool = False,
+    element_id: str = "s3-audio-el",
+) -> str:
     """Convert (sample_rate, int16_ndarray) to an autoplay HTML audio element.
 
     Uses a native <audio> element to bypass WaveSurfer's retained playback
@@ -699,19 +1096,87 @@ def audio_to_html(audio_tuple, *, notify_done: bool = False, playback_ms: int = 
         wf.writeframes(data.tobytes())
     b64 = base64.b64encode(buf.getvalue()).decode()
     if not notify_done:
+        loop_attr = " loop" if loop else ""
         return (
-            f'<audio autoplay src="data:audio/wav;base64,{b64}" '
-            f'style="display:none" id="s3-audio-el"></audio>'
+            f'<audio autoplay{loop_attr} src="data:audio/wav;base64,{b64}" '
+            f'style="display:none" id="{element_id}"></audio>'
         )
     _click = (
         "clearTimeout(window._raWd);"
         "(function(){var b=document.getElementById('btn-audio-done');"
         "var t=b?(b.querySelector('button')||b):null;if(t)t.click();})();"
     )
+    _stop_metro = (
+        "if(window.raStopThinkingMetronome)"
+        "window.raStopThinkingMetronome();"
+    )
+
     return (
         f'<audio autoplay src="data:audio/wav;base64,{b64}" '
-        f'style="display:none" id="s3-audio-el" data-ms="{int(playback_ms)}" '
-        f'onended="{_click}" onerror="{_click}"></audio>'
+        f'style="display:none" id="s3-audio-el" '
+        f'data-ms="{int(playback_ms)}" '
+        f'onloadeddata="{_stop_metro}" '
+        f'oncanplay="{_stop_metro}" '
+        f'onplay="{_stop_metro}" '
+        f'onended="{_click}" '
+        f'onerror="{_click}"></audio>'
+    )
+
+
+_METRONOME_CACHE: dict[tuple[int, int], tuple[int, np.ndarray]] = {}
+
+
+def build_metronome_audio(
+    bpm: int,
+    sample_rate: int = SAMPLE_RATE,
+) -> tuple:
+    """AI 생성 대기 중 반복할 조용한 4/4 한 마디 클릭."""
+    cache_key = (int(bpm), int(sample_rate))
+    cached = _METRONOME_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    safe_bpm = max(30, min(240, int(bpm)))
+    beat_seconds = 60.0 / safe_bpm
+    bar_seconds = beat_seconds * 4.0
+    audio = np.zeros(
+        max(1, int(np.ceil(bar_seconds * sample_rate))),
+        dtype=np.float32,
+    )
+
+    click_duration = 0.045
+    click_samples = max(1, int(click_duration * sample_rate))
+    time_axis = np.arange(click_samples, dtype=np.float32) / sample_rate
+    envelope = np.exp(-55.0 * time_axis).astype(np.float32)
+
+    for beat in range(4):
+        frequency = 1320.0 if beat == 0 else 880.0
+        gain = 0.20 if beat == 0 else 0.105
+        click = (
+            np.sin(2.0 * np.pi * frequency * time_axis)
+            + 0.18 * np.sin(2.0 * np.pi * frequency * 2.0 * time_axis)
+        )
+        click = click.astype(np.float32) * envelope * gain
+
+        start = int(round(beat * beat_seconds * sample_rate))
+        end = min(len(audio), start + len(click))
+        if end > start:
+            audio[start:end] += click[: end - start]
+
+    pcm = (
+        np.clip(np.tanh(audio * 1.1), -1.0, 1.0) * 32767
+    ).astype(np.int16)
+
+    result = (int(sample_rate), pcm)
+    _METRONOME_CACHE[cache_key] = result
+    return result
+
+
+def metronome_html(bpm: int) -> str:
+    return audio_to_html(
+        build_metronome_audio(bpm),
+        loop=True,
+        element_id="s3-thinking-metronome",
     )
 
 
@@ -1108,6 +1573,10 @@ KEYBOARD_JS = """() => {
     return fallback;
   }
 
+  const PIANO_SAMPLE_URLS = __PIANO_SAMPLE_URLS__;
+  const pianoSampleBuffers = new Map();
+  let pianoPreloadStarted = false;
+
   let audioCtx = null;
   let masterGain = null;
   function ensureAudioCtx() {
@@ -1120,6 +1589,16 @@ KEYBOARD_JS = """() => {
     if (audioCtx.state === 'suspended') {
       try { audioCtx.resume(); } catch (_) {}
     }
+    if (!pianoPreloadStarted) {
+      pianoPreloadStarted = true;
+      Object.entries(PIANO_SAMPLE_URLS).forEach(([midi, url]) => {
+        fetch(url)
+          .then(response => response.arrayBuffer())
+          .then(arrayBuffer => audioCtx.decodeAudioData(arrayBuffer))
+          .then(buffer => pianoSampleBuffers.set(Number(midi), buffer))
+          .catch(() => {});
+      });
+    }
     return audioCtx;
   }
 
@@ -1130,31 +1609,277 @@ KEYBOARD_JS = """() => {
     } catch (_) {}
   }
 
+
+  let thinkingMetroTimer = null;
+  let thinkingMetroNext = 0;
+  let thinkingMetroBeat = 0;
+  let thinkingMetroGain = null;
+  const thinkingMetroSources = new Set();
+
+  function currentBpm() {
+    const text = document.body ? document.body.innerText : '';
+    const match = text.match(/(?:^|\s)(70|80|90|100|110)\s*BPM/i);
+    return match ? Number(match[1]) : 90;
+  }
+
+  function metroClick(time, accent) {
+    const ctx = ensureAudioCtx();
+
+    if (!thinkingMetroGain) return;
+
+    const body = ctx.createOscillator();
+    const edge = ctx.createOscillator();
+    const bodyGain = ctx.createGain();
+    const edgeGain = ctx.createGain();
+
+    body.type = 'triangle';
+    edge.type = 'square';
+
+    body.frequency.setValueAtTime(
+      accent ? 1480 : 980,
+      time
+    );
+
+    edge.frequency.setValueAtTime(
+      accent ? 2960 : 1960,
+      time
+    );
+
+    bodyGain.gain.setValueAtTime(
+      0.0001,
+      time
+    );
+
+    bodyGain.gain.exponentialRampToValueAtTime(
+      accent ? 0.30 : 0.18,
+      time + 0.002
+    );
+
+    bodyGain.gain.exponentialRampToValueAtTime(
+      0.0001,
+      time + 0.070
+    );
+
+    edgeGain.gain.setValueAtTime(
+      0.0001,
+      time
+    );
+
+    edgeGain.gain.exponentialRampToValueAtTime(
+      accent ? 0.075 : 0.040,
+      time + 0.001
+    );
+
+    edgeGain.gain.exponentialRampToValueAtTime(
+      0.0001,
+      time + 0.022
+    );
+
+    body.connect(bodyGain);
+    edge.connect(edgeGain);
+
+    bodyGain.connect(
+      thinkingMetroGain
+    );
+
+    edgeGain.connect(
+      thinkingMetroGain
+    );
+
+    thinkingMetroSources.add(body);
+    thinkingMetroSources.add(edge);
+
+    body.onended = () => {
+      thinkingMetroSources.delete(body);
+    };
+
+    edge.onended = () => {
+      thinkingMetroSources.delete(edge);
+    };
+
+    body.start(time);
+    edge.start(time);
+
+    body.stop(
+      time + 0.080
+    );
+
+    edge.stop(
+      time + 0.030
+    );
+  }
+
+  window.raStartThinkingMetronome = function() {
+    window.raStopThinkingMetronome();
+
+    const ctx = ensureAudioCtx();
+
+    thinkingMetroGain = ctx.createGain();
+
+    thinkingMetroGain.gain.setValueAtTime(
+      1.0,
+      ctx.currentTime
+    );
+
+    thinkingMetroGain.connect(
+      masterGain
+    );
+
+    const beatDur = (
+      60 / currentBpm()
+    );
+
+    thinkingMetroNext = (
+      ctx.currentTime + 0.03
+    );
+
+    thinkingMetroBeat = 0;
+
+    thinkingMetroTimer = setInterval(
+      function() {
+        while (
+          thinkingMetroNext
+          < ctx.currentTime + 0.12
+        ) {
+          metroClick(
+            thinkingMetroNext,
+            thinkingMetroBeat % 4 === 0
+          );
+
+          thinkingMetroNext += beatDur;
+          thinkingMetroBeat += 1;
+        }
+      },
+      25
+    );
+  };
+
+  window.raStopThinkingMetronome = function() {
+    if (
+      thinkingMetroTimer
+      !== null
+    ) {
+      clearInterval(
+        thinkingMetroTimer
+      );
+
+      thinkingMetroTimer = null;
+    }
+
+    /*
+     * 이미 미래 시점에 예약된 클릭도
+     * AI 음악 시작 순간 즉시 음소거한다.
+     */
+    if (
+      audioCtx
+      && thinkingMetroGain
+    ) {
+      try {
+        const now = (
+          audioCtx.currentTime
+        );
+
+        thinkingMetroGain.gain
+          .cancelScheduledValues(now);
+
+        thinkingMetroGain.gain
+          .setValueAtTime(
+            0.0,
+            now
+          );
+
+        thinkingMetroGain.disconnect();
+
+      } catch (_) {}
+
+      thinkingMetroGain = null;
+    }
+
+    /*
+     * 이미 생성된 oscillator도
+     * 전부 즉시 종료한다.
+     */
+    for (
+      const source
+      of thinkingMetroSources
+    ) {
+      try {
+        source.stop(0);
+      } catch (_) {}
+
+      try {
+        source.disconnect();
+      } catch (_) {}
+    }
+
+    thinkingMetroSources.clear();
+
+    thinkingMetroNext = 0;
+    thinkingMetroBeat = 0;
+
+    /*
+     * 이전 방식의 HTML 메트로놈이
+     * 남아 있는 경우도 제거한다.
+     */
+    const oldMetro = document.getElementById(
+      's3-thinking-metronome'
+    );
+
+    if (oldMetro) {
+      try {
+        oldMetro.pause();
+        oldMetro.currentTime = 0;
+      } catch (_) {}
+
+      oldMetro.remove();
+    }
+  };
+
   function playPreviewTone(midi) {
     if (midi < 21 || midi > 108) return;
+
     try {
       const ctx = ensureAudioCtx();
       if (!ctx || !masterGain) return;
+
+      const buffer = pianoSampleBuffers.get(Number(midi));
+
+      if (buffer) {
+        const source = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        const now = ctx.currentTime;
+
+        source.buffer = buffer;
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.92, now + 0.004);
+        gain.gain.exponentialRampToValueAtTime(
+          0.0001,
+          now + Math.min(0.80, buffer.duration)
+        );
+
+        source.connect(gain);
+        gain.connect(masterGain);
+        source.start(now);
+        return;
+      }
+
+      // 샘플이 아직 decode되지 않은 첫 순간에만 쓰는 짧은 fallback.
       const freq = 440 * Math.pow(2, (midi - 69) / 12);
       const osc = ctx.createOscillator();
-      const osc2 = ctx.createOscillator();
       const gain = ctx.createGain();
-      const t0 = ctx.currentTime;
-      const dur = 0.26;
+      const now = ctx.currentTime;
+
       osc.type = 'triangle';
-      osc2.type = 'sine';
       osc.frequency.value = freq;
-      osc2.frequency.value = freq * 2;
-      gain.gain.setValueAtTime(0.0001, t0);
-      gain.gain.exponentialRampToValueAtTime(0.55, t0 + 0.012);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.18, now + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.10);
+
       osc.connect(gain);
-      osc2.connect(gain);
       gain.connect(masterGain);
-      osc.start(t0);
-      osc2.start(t0);
-      osc.stop(t0 + dur + 0.04);
-      osc2.stop(t0 + dur + 0.04);
+      osc.start(now);
+      osc.stop(now + 0.12);
+
     } catch (_) {}
   }
 
@@ -1179,9 +1904,21 @@ KEYBOARD_JS = """() => {
 
   function clickConfirm() {
     const btn = gradioBtn('btn-confirm');
-    if (btn && !btn.disabled) btn.click();
+    if (btn && !btn.disabled) {
+      window.raStartThinkingMetronome();
+      btn.click();
+    }
   }
   window.raClickConfirm = clickConfirm;
+
+
+  window.addEventListener('click', function(event) {
+    const path = event.composedPath ? event.composedPath() : [];
+    const isConfirm = path.some(function(node) {
+      return node && node.id === 'btn-confirm';
+    });
+    if (isConfirm) window.raStartThinkingMetronome();
+  }, true);
 
   // ── 허밍 모드 헬퍼 ─────────────────────────────────────────────────────
   // S3 마이크 호스트가 보이면 허밍 모드(녹음 입력) 상태.
@@ -1447,6 +2184,11 @@ KEYBOARD_JS = """() => {
 
   console.log('[RespondAI] keyboard ready');
 }"""
+
+KEYBOARD_JS = KEYBOARD_JS.replace(
+    "__PIANO_SAMPLE_URLS__",
+    _BROWSER_PIANO_SAMPLES_JSON,
+)
 
 STOP_AUDIO_JS = """() => {
   document.querySelectorAll('audio').forEach(a => {
@@ -4021,7 +4763,7 @@ with gr.Blocks(**_blocks_kwargs) as app:
 
 
 if __name__ == "__main__":
-    server_name = os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1")
+    server_name = os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0")
     server_port = int(os.environ.get("GRADIO_SERVER_PORT", "7860"))
     launch_kwargs: dict = {"share": False, "server_name": server_name, "server_port": server_port}
     if _GR_MAJOR >= 6:

@@ -16,11 +16,18 @@ import numpy as np
 from data.tokenizer import Note, STEPS_PER_BAR
 from input.piano import synth_notes
 
+try:
+    from input.fluid_band import get_shared_renderer
+except Exception:
+    get_shared_renderer = None
+
+_FLUID_RENDERER = None
+
 
 _AUDIO_POOL = ThreadPoolExecutor(max_workers=4)
 
-BASS_GAIN = 0.30
-COMP_GAIN = 0.13
+BASS_GAIN = 0.42
+COMP_GAIN = 0.18
 
 _ROOT_PC = {
     "C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
@@ -181,6 +188,7 @@ def make_random_backing_layers(
     round_num: int = 1,
     exchange_num: int = 1,
 ) -> tuple[List[Note], List[Note], dict]:
+    """마디별 멜로디 강박에 맞는 안전한 재즈 코드를 선택한다."""
     if not melody_notes or not key_token:
         return [], [], {}
 
@@ -194,30 +202,128 @@ def make_random_backing_layers(
         )
     )
 
-    progressions = _MINOR_PROGRESSIONS if is_minor else _MAJOR_PROGRESSIONS
-    progression_index = rng.randrange(len(progressions))
-    bass_pattern_index = rng.randrange(len(_BASS_PATTERNS))
-    comp_pattern_index = rng.randrange(len(_COMP_PATTERNS))
-
-    progression = progressions[progression_index]
-    bass_pattern_name, bass_pattern = _BASS_PATTERNS[bass_pattern_index]
-    comp_pattern_name, comp_pattern = _COMP_PATTERNS[comp_pattern_index]
-
     span = max(int(note.end) for note in melody_notes)
     number_of_bars = max(
         1,
         (span + STEPS_PER_BAR - 1) // STEPS_PER_BAR,
     )
 
+    if is_minor:
+        chord_candidates = (
+            (0, "min7"),
+            (5, "min7"),
+            (7, "7"),
+            (8, "maj7"),
+            (10, "7"),
+        )
+        scale_intervals = (0, 2, 3, 5, 7, 8, 10)
+    else:
+        chord_candidates = (
+            (0, "maj7"),
+            (2, "min7"),
+            (5, "maj7"),
+            (7, "7"),
+            (9, "min7"),
+        )
+        scale_intervals = (0, 2, 4, 5, 7, 9, 11)
+
+    scale_pcs = {
+        (key_root_pc + interval) % 12
+        for interval in scale_intervals
+    }
+
+    chord_plan: list[tuple[int, str]] = []
+    previous_root: Optional[int] = None
+
+    for bar_index in range(number_of_bars):
+        bar_start = bar_index * STEPS_PER_BAR
+        bar_end = bar_start + STEPS_PER_BAR
+        bar_notes = [
+            note
+            for note in melody_notes
+            if bar_start <= int(note.start) < bar_end
+        ]
+
+        def chord_score(candidate: tuple[int, str]) -> float:
+            offset, quality = candidate
+            root_pc = (key_root_pc + offset) % 12
+            chord_pcs = {
+                (root_pc + interval) % 12
+                for interval in _CHORD_INTERVALS[quality]
+            }
+
+            score = 0.0
+            for note in bar_notes:
+                position = int(note.start) % STEPS_PER_BAR
+                weight = (
+                    2.7
+                    if position in (0, 8)
+                    else 1.5
+                    if position in (4, 12)
+                    else 0.8
+                )
+                pitch_class = int(note.pitch) % 12
+
+                if pitch_class in chord_pcs:
+                    score += 2.3 * weight
+                elif pitch_class in scale_pcs:
+                    score += 0.18 * weight
+                else:
+                    score -= 1.2 * weight
+
+            # 빈 마디나 비슷한 점수에서는 tonic을 우선한다.
+            if offset == 0:
+                score += 0.75
+
+            if previous_root is not None:
+                movement = (root_pc - previous_root) % 12
+                if movement == 0:
+                    score += 0.35
+                elif movement in (5, 7):
+                    score += 0.50
+                elif movement == 6:
+                    score -= 0.45
+
+            return score
+
+        chosen = max(
+            chord_candidates,
+            key=chord_score,
+        )
+        chord_plan.append(chosen)
+        previous_root = (key_root_pc + chosen[0]) % 12
+
+    # 복잡한 walking/busy 패턴 대신 반주 역할에 집중한다.
+    safe_bass_indices = (0, 4, 5)
+    safe_comp_indices = (0, 6, 7, 8)
+    bass_pattern_index = safe_bass_indices[
+        rng.randrange(len(safe_bass_indices))
+    ]
+    comp_pattern_index = safe_comp_indices[
+        rng.randrange(len(safe_comp_indices))
+    ]
+
+    bass_pattern_name, bass_pattern = _BASS_PATTERNS[
+        bass_pattern_index
+    ]
+    comp_pattern_name, comp_pattern = _COMP_PATTERNS[
+        comp_pattern_index
+    ]
+
     bass_notes: List[Note] = []
     comp_notes: List[Note] = []
 
-    for bar_index in range(number_of_bars):
-        chord_offset, chord_quality = progression[bar_index % len(progression)]
-        next_offset, _ = progression[(bar_index + 1) % len(progression)]
+    for bar_index, (chord_offset, chord_quality) in enumerate(chord_plan):
+        next_offset, _ = chord_plan[
+            min(bar_index + 1, len(chord_plan) - 1)
+        ]
 
-        chord_root_pc = (key_root_pc + chord_offset) % 12
-        next_root_pc = (key_root_pc + next_offset) % 12
+        chord_root_pc = (
+            key_root_pc + chord_offset
+        ) % 12
+        next_root_pc = (
+            key_root_pc + next_offset
+        ) % 12
 
         bass_root = _nearest_pitch_class(
             chord_root_pc,
@@ -229,7 +335,7 @@ def make_random_backing_layers(
         )
         comp_root = _nearest_pitch_class(
             chord_root_pc,
-            preferred_midi=48 + key_root_pc,
+            preferred_midi=47 + key_root_pc,
         )
 
         bar_start = bar_index * STEPS_PER_BAR
@@ -238,9 +344,14 @@ def make_random_backing_layers(
             start = bar_start + local_start
             if start >= span:
                 continue
-            end = min(start + duration, span)
+
+            end = min(
+                start + duration,
+                span,
+            )
             if end <= start:
                 continue
+
             bass_notes.append(
                 Note(
                     _bass_role_pitch(
@@ -258,18 +369,41 @@ def make_random_backing_layers(
             start = bar_start + local_start
             if start >= span:
                 continue
-            end = min(start + duration, span)
+
+            end = min(
+                start + duration,
+                span,
+            )
             if end <= start:
                 continue
+
+            # full/pad 대신 shell/rootless 위주로 멜로디와 충돌을 줄인다.
+            safe_voicing = (
+                "rootless"
+                if voicing_name in ("full", "upper", "pad")
+                else voicing_name
+            )
+
             for pitch in _chord_voicing(
                 comp_root,
                 chord_quality,
-                voicing_name,
+                safe_voicing,
             ):
-                comp_notes.append(Note(pitch, start, end))
+                # 컴핑을 리드보다 아래에 제한한다.
+                comp_notes.append(
+                    Note(
+                        min(pitch, 67),
+                        start,
+                        end,
+                    )
+                )
 
     metadata = {
-        "progression_index": progression_index,
+        "progression_index": -1,
+        "chord_plan": [
+            f"{offset}:{quality}"
+            for offset, quality in chord_plan
+        ],
         "bass_pattern_index": bass_pattern_index,
         "bass_pattern_name": bass_pattern_name,
         "comp_pattern_index": comp_pattern_index,
@@ -289,120 +423,353 @@ def _mix_layer(
     destination[:length] += source[:length] * float(gain)
 
 
+def _soft_compress(
+    audio: np.ndarray,
+    threshold: float = 0.42,
+    ratio: float = 3.5,
+) -> np.ndarray:
+    """여러 화음이 겹칠 때 생기는 순간적인 음량 급증을 완화한다."""
+    if audio.size == 0:
+        return audio
+
+    magnitude = np.abs(audio)
+    compressed = np.where(
+        magnitude <= threshold,
+        magnitude,
+        threshold + (magnitude - threshold) / max(1.0, ratio),
+    )
+    return (np.sign(audio) * compressed).astype(np.float32, copy=False)
+
+
+def _shift_notes(notes: Sequence[Note], offset: int) -> List[Note]:
+    return [Note(int(note.pitch), int(note.start) + offset, int(note.end) + offset) for note in notes]
+
+
+
+def _split_notes_at_step(
+    notes: Sequence[Note],
+    boundary: int,
+) -> tuple[List[Note], List[Note]]:
+    """경계를 가로지르는 반주 노트를 잘라 CALL/RESPONSE 음량을 따로 준다."""
+    before: List[Note] = []
+    after: List[Note] = []
+
+    for note in notes:
+        start = int(note.start)
+        end = int(note.end)
+        if end <= boundary:
+            before.append(Note(int(note.pitch), start, end))
+        elif start >= boundary:
+            after.append(Note(int(note.pitch), start, end))
+        else:
+            if boundary > start:
+                before.append(Note(int(note.pitch), start, boundary))
+            if end > boundary:
+                after.append(Note(int(note.pitch), boundary, end))
+
+    return before, after
+
+
+def _cadence_notes(
+    key_token: str,
+    start_step: int,
+    duration_steps: int = 4,
+) -> tuple[List[Note], List[Note]]:
+    root_pc, is_minor = _parse_key_token(key_token)
+    quality = "min7" if is_minor else "maj7"
+    bass_root = _nearest_pitch_class(root_pc, 36 + root_pc)
+    comp_root = _nearest_pitch_class(root_pc, 48 + root_pc)
+    end_step = int(start_step) + max(2, int(duration_steps))
+    bass = [Note(bass_root, int(start_step), end_step)]
+    comp = [
+        Note(pitch, int(start_step), end_step)
+        for pitch in _chord_voicing(comp_root, quality, "full")
+    ]
+    return bass, comp
+
+
+def _get_fluid_renderer(sample_rate: int):
+    global _FLUID_RENDERER
+
+    if get_shared_renderer is None:
+        return None
+
+    if _FLUID_RENDERER is None:
+        try:
+            _FLUID_RENDERER = get_shared_renderer(sample_rate)
+            print("[AUDIO] Shared persistent FluidSynth ready")
+        except Exception as exc:
+            print(
+                "[AUDIO] FluidSynth unavailable, "
+                f"fallback to fast synth: {exc}"
+            )
+            _FLUID_RENDERER = False
+
+    return (
+        _FLUID_RENDERER
+        if _FLUID_RENDERER is not False
+        else None
+    )
+
+
+
+
+def _soften_ai_piano(
+    audio: np.ndarray,
+) -> np.ndarray:
+    """AI 피아노의 날카로운 고역과 짧은 clipping성 잡음을 줄인다."""
+    if audio.size < 3:
+        return audio.astype(np.float32, copy=False)
+
+    source = audio.astype(np.float32, copy=False)
+    softened = source.copy()
+    softened[1:-1] = (
+        0.20 * source[:-2]
+        + 0.60 * source[1:-1]
+        + 0.20 * source[2:]
+    )
+
+    # 강한 transient만 부드럽게 제한한다.
+    return np.tanh(
+        softened * 0.92
+    ).astype(
+        np.float32,
+        copy=False,
+    )
+
 def build_round_audio(
     user_notes: Sequence[Note],
     ai_notes: Sequence[Note],
     bpm: int,
     *,
     sample_rate: int = 22050,
-    ai_response_max_sec: float = 4.0,
-    swing_amount: float = 0.60,
+    ai_response_max_sec: float = 8.0,
+    swing_amount: float = 0.64,
     key_token: Optional[str] = None,
     round_num: int = 1,
     exchange_num: int = 1,
     bass_gain: float = BASS_GAIN,
     comp_gain: float = COMP_GAIN,
 ) -> tuple[int, np.ndarray]:
-    """Render user melody, AI melody, bass, and comping."""
-    gap = np.zeros(int(0.15 * sample_rate), dtype=np.float32)
-    swing_amount = float(np.clip(swing_amount, 0.0, 1.0))
+    """부드러운 피아노와 마디별 적응형 반주를 stem 단위로 믹스한다."""
+    del ai_response_max_sec, bass_gain, comp_gain
 
-    bass_notes: List[Note] = []
-    comp_notes: List[Note] = []
-    backing_meta: dict = {}
+    renderer = _get_fluid_renderer(sample_rate)
 
-    if ai_notes and key_token:
-        bass_notes, comp_notes, backing_meta = make_random_backing_layers(
-            ai_notes,
-            key_token,
-            round_num=round_num,
-            exchange_num=exchange_num,
+    if not ai_notes or not key_token:
+        if renderer is not None:
+            preview = renderer.render(
+                [(0, list(user_notes), 86)],
+                bpm=bpm,
+                swing_amount=0.0,
+                tail_sec=0.42,
+            )
+        else:
+            preview = synth_notes(
+                list(user_notes),
+                bpm=bpm,
+                sample_rate=sample_rate,
+                role="user",
+                swing_amount=0.0,
+            )
+
+        return (
+            int(sample_rate),
+            (
+                np.clip(preview, -1.0, 1.0)
+                * 32767
+            ).astype(np.int16),
         )
 
-    user_future = _AUDIO_POOL.submit(
-        synth_notes,
-        list(user_notes),
-        bpm=bpm,
-        sample_rate=sample_rate,
-        role="user",
-        swing_amount=min(swing_amount, 0.52),
-        humanize_ms=2.0,
+    user_end = max(
+        (int(note.end) for note in user_notes),
+        default=0,
     )
-    ai_future = _AUDIO_POOL.submit(
-        synth_notes,
-        list(ai_notes),
-        bpm=bpm,
-        sample_rate=sample_rate,
-        role="ai",
-        tail_sec=0.05,
-        swing_amount=swing_amount,
-        humanize_ms=8.0,
+
+    # 사용자 끝 뒤 최소 한 박의 숨을 두고 다음 beat에서 AI가 시작한다.
+    ai_start = ((user_end + 3) // 4) * 4
+    if ai_start <= user_end:
+        ai_start += 4
+
+    ai_shifted = _shift_notes(
+        ai_notes,
+        ai_start,
     )
-    bass_future = (
-        _AUDIO_POOL.submit(
-            synth_notes,
-            bass_notes,
+
+    total_end = max(
+        (int(note.end) for note in ai_shifted),
+        default=ai_start + STEPS_PER_BAR,
+    )
+
+    guide = list(user_notes) + ai_shifted
+
+    bass_notes, comp_notes, meta = make_random_backing_layers(
+        guide,
+        key_token,
+        round_num=round_num,
+        exchange_num=exchange_num,
+    )
+
+    cadence_bass, cadence_comp = _cadence_notes(
+        key_token,
+        total_end,
+        duration_steps=4,
+    )
+    bass_notes.extend(cadence_bass)
+    comp_notes.extend(cadence_comp)
+
+    bass_call, bass_answer = _split_notes_at_step(
+        bass_notes,
+        ai_start,
+    )
+    comp_call, comp_answer = _split_notes_at_step(
+        comp_notes,
+        ai_start,
+    )
+
+    if renderer is not None:
+        user_audio = renderer.render(
+            [(0, list(user_notes), 84)],
+            bpm=bpm,
+            swing_amount=0.0,
+            tail_sec=0.52,
+        )
+
+        ai_audio = renderer.render(
+            [(3, ai_shifted, 80)],
+            bpm=bpm,
+            swing_amount=max(0.64, swing_amount),
+            tail_sec=0.58,
+        )
+        ai_audio = _soften_ai_piano(ai_audio)
+
+        bass_audio = renderer.render(
+            [
+                (1, bass_call, 68),
+                (1, bass_answer, 82),
+            ],
+            bpm=bpm,
+            swing_amount=0.14,
+            tail_sec=0.58,
+        )
+
+        comp_audio = renderer.render(
+            [
+                (2, comp_call, 56),
+                (2, comp_answer, 70),
+            ],
+            bpm=bpm,
+            swing_amount=max(0.62, swing_amount),
+            tail_sec=0.64,
+        )
+
+        length = max(
+            len(user_audio),
+            len(ai_audio),
+            len(bass_audio),
+            len(comp_audio),
+            1,
+        )
+        audio = np.zeros(
+            length,
+            dtype=np.float32,
+        )
+
+        # 리드는 줄이고 베이스와 컴핑은 실제로 들리게 한다.
+        _mix_layer(audio, user_audio, 0.56)
+        _mix_layer(audio, ai_audio, 0.58)
+        _mix_layer(audio, bass_audio, 0.58)
+        _mix_layer(audio, comp_audio, 0.46)
+
+        audio = _soft_compress(
+            audio,
+            threshold=0.48,
+            ratio=3.2,
+        )
+
+        peak = (
+            float(np.max(np.abs(audio)))
+            if audio.size
+            else 0.0
+        )
+        if peak > 1e-8:
+            audio = audio / peak * 0.86
+
+        user_rms = float(np.sqrt(np.mean(np.square(user_audio))))
+        ai_rms = float(np.sqrt(np.mean(np.square(ai_audio))))
+        bass_rms = float(np.sqrt(np.mean(np.square(bass_audio))))
+        comp_rms = float(np.sqrt(np.mean(np.square(comp_audio))))
+
+    else:
+        user_audio = synth_notes(
+            list(user_notes),
             bpm=bpm,
             sample_rate=sample_rate,
             role="user",
-            tail_sec=0.05,
-            swing_amount=0.12,
-            humanize_ms=2.0,
+            swing_amount=0.0,
         )
-        if bass_notes
-        else None
-    )
-    comp_future = (
-        _AUDIO_POOL.submit(
-            synth_notes,
-            comp_notes,
+        ai_audio = synth_notes(
+            ai_shifted,
             bpm=bpm,
             sample_rate=sample_rate,
             role="ai",
-            tail_sec=0.08,
-            swing_amount=swing_amount,
-            humanize_ms=5.0,
+            swing_amount=max(0.64, swing_amount),
         )
-        if comp_notes
-        else None
-    )
+        bass_audio = synth_notes(
+            bass_notes,
+            bpm=bpm,
+            sample_rate=sample_rate,
+            role="bass",
+            swing_amount=0.14,
+        )
+        comp_audio = synth_notes(
+            comp_notes,
+            bpm=bpm,
+            sample_rate=sample_rate,
+            role="comp",
+            swing_amount=max(0.62, swing_amount),
+        )
 
-    user_wav = user_future.result()
-    ai_wav = ai_future.result()
-    bass_wav = bass_future.result() if bass_future else None
-    comp_wav = comp_future.result() if comp_future else None
+        length = max(
+            len(user_audio),
+            len(ai_audio),
+            len(bass_audio),
+            len(comp_audio),
+            1,
+        )
+        audio = np.zeros(length, dtype=np.float32)
+        _mix_layer(audio, user_audio, 0.50)
+        _mix_layer(audio, ai_audio, 0.52)
+        _mix_layer(audio, bass_audio, 0.64)
+        _mix_layer(audio, comp_audio, 0.52)
 
-    ai_mix_length = max(
-        len(ai_wav),
-        len(bass_wav) if bass_wav is not None else 0,
-        len(comp_wav) if comp_wav is not None else 0,
-        1,
-    )
-    ai_mix = np.zeros(ai_mix_length, dtype=np.float32)
+        audio = _soft_compress(
+            audio,
+            threshold=0.46,
+            ratio=3.2,
+        )
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        if peak > 1e-8:
+            audio = audio / peak * 0.84
 
-    _mix_layer(ai_mix, ai_wav, 1.0)
-    _mix_layer(ai_mix, bass_wav, bass_gain)
-    _mix_layer(ai_mix, comp_wav, comp_gain)
+        user_rms = ai_rms = bass_rms = comp_rms = -1.0
 
-    ai_max_samples = int(float(ai_response_max_sec) * int(sample_rate))
-    ai_mix = ai_mix[:ai_max_samples]
-
-    combined = np.concatenate([user_wav, gap, ai_mix])
-    peak = float(np.max(np.abs(combined))) if len(combined) else 0.0
-
-    if peak < 1e-8:
-        combined = gap
-        peak = float(np.max(np.abs(gap))) or 1.0
-
-    combined = (combined / peak * 0.92).astype(np.float32)
-
-    if backing_meta:
+    if meta:
         print(
-            "[BACKING] "
-            f"progression={backing_meta['progression_index']} "
-            f"bass={backing_meta['bass_pattern_name']} "
-            f"comp={backing_meta['comp_pattern_name']}"
+            "[MUSIC V4] "
+            f"chords={meta.get('chord_plan')} "
+            f"bass={meta['bass_pattern_name']}({len(bass_notes)}) "
+            f"comp={meta['comp_pattern_name']}({len(comp_notes)}) "
+            f"fluid={renderer is not None} "
+            f"rms=user:{user_rms:.4f}/ai:{ai_rms:.4f}/"
+            f"bass:{bass_rms:.4f}/comp:{comp_rms:.4f} "
+            f"ai_swing={max(0.64, swing_amount):.2f}"
         )
 
-    pcm = (np.clip(combined, -1.0, 1.0) * 32767).astype(np.int16)
-    return int(sample_rate), pcm
+    return (
+        int(sample_rate),
+        (
+            np.clip(audio, -1.0, 1.0)
+            * 32767
+        ).astype(np.int16),
+    )
