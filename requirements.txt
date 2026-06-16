@@ -1,21 +1,24 @@
-# torch, gradio, huggingface_hub — HF Spaces 기본 이미지에 포함, 명시 불필요
+torch>=2.2,<3
+huggingface_hub>=0.24,<2
 
-numpy>=1.24.0
-tqdm>=4.65.0
+numpy>=1.24,<3
+scipy>=1.10,<2
+tqdm>=4.65,<5
 
 # MIDI processing
-pretty_midi>=0.2.10
-mido>=1.3.0
-music21>=9.1.0
+pretty_midi>=0.2.10,<1
+mido>=1.3,<2
+music21>=9.1,<10
 
 # Audio / humming mode
-librosa>=0.10.1
-soundfile>=0.12.1
+librosa>=0.10.1,<0.12
+soundfile>=0.12.1,<1
 pesto-pitch>=0.1.0
+pyFluidSynth>=1.3,<2
 
 # Data utilities
-pandas>=2.0.0
-scikit-learn>=1.3.0
+pandas>=2,<3
+scikit-learn>=1.3,<2
 
 # Visualization
-matplotlib>=3.7.0
+matplotlib>=3.7,<4
