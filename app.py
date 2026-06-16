@@ -3965,7 +3965,7 @@ with gr.Blocks(**_blocks_kwargs) as app:
       <div class="ra-howto-pane active" data-pane="play">
         <h3 class="ra-howto-h">어떻게 진행되나요?</h3>
         <ul class="ra-modal-list ra-modal-list-bullets">
-          <li>총 5라운드, 라운드마다 AI와 멜로디를 주고받습니다.</li>
+          <li>총 2라운드, 라운드마다 AI와 멜로디를 주고받습니다.</li>
           <li>매 라운드는 3번의 교환으로 이루어집니다.<br/><span class="ra-howto-dim">→ 내가 먼저 연주 → AI가 응답 → 내가 다시 연주 (×3)</span></li>
           <li>가상 피아노 건반을 클릭하거나 키보드 단축키로 음을 입력하세요.</li>
           <li>입력을 마치면 <b>[확정]</b> 버튼 또는 <kbd>Enter</kbd>를 누르세요.</li>
@@ -4015,7 +4015,7 @@ with gr.Blocks(**_blocks_kwargs) as app:
           <li><span class="ra-tip-ico">🎼</span><span><b>라운드 시작 전 Key를 확인하세요.</b><br/>"Key: D minor" 라면 레·미♭·파·솔·라·시♭·도 안에서 연주하면 유리합니다.</span></li>
           <li><span class="ra-tip-ico">🔁</span><span><b>1라운드 첫 연주가 가장 중요합니다.</b><br/>이 멜로디가 게임 전체의 기준이 됩니다. 기억하기 쉬운 짧은 패턴을 만들어보세요.</span></li>
           <li><span class="ra-tip-ico">👂</span><span><b>AI의 리듬을 잘 들어보세요.</b><br/>AI가 응답한 뒤, 그 박자감을 다음 입력에 반영하면 리듬 호응 점수가 올라갑니다.</span></li>
-          <li><span class="ra-tip-ico">🎹</span><span><b>마지막 라운드에서 첫 멜로디로 돌아오세요.</b><br/>R5에서 처음 만든 모티프를 다시 쓰면 +150점 보너스를 받습니다.</span></li>
+          <li><span class="ra-tip-ico">🎹</span><span><b>마지막 라운드에서 첫 멜로디로 돌아오세요.</b><br/>R2에서 처음 만든 모티프를 다시 쓰면 +150점 보너스를 받습니다.</span></li>
         </ul>
         <div class="ra-grade-tables">
           <div class="ra-grade-block">
@@ -4048,8 +4048,8 @@ with gr.Blocks(**_blocks_kwargs) as app:
     <div class="ra-modal-body">
       <p>RespondAI는 음악 AI와 사람의 즉흥 인터랙션을 탐구하는 <b>Deep Learning for Music and Audio</b> final project입니다.</p>
       <ul class="ra-modal-list ra-modal-list-bullets">
-        <li><b>박시현 (Team A) — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
-        <li><b>강유영 (Team B) — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
+        <li><b>박시현 — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
+        <li><b>강유영\ — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
       </ul>
       <p class="ra-modal-foot">코드와 자세한 문서는 상단의 GitHub 링크에서 확인하세요.</p>
     </div>
