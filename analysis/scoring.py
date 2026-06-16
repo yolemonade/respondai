@@ -171,12 +171,12 @@ def score_response(
 # -----------------------------------------------------------------------------
 
 def grade_from_total(total: int) -> str:
-    """Map a cumulative 5-round score (max 5000) to a letter grade."""
-    if total >= 4500:
+    """Map a cumulative 2-round score (max 2000) to a letter grade."""
+    if total >= 1800:
         return "S"
-    if total >= 3500:
+    if total >= 1400:
         return "A"
-    if total >= 2500:
+    if total >= 1000:
         return "B"
     return "C"
 
@@ -185,7 +185,7 @@ def session_summary(round_results: Sequence[dict]) -> dict:
     """Aggregate a list of round results into a final report.
 
     Applies the bonuses described in the spec:
-      * +100 for three consecutive rounds above 700.
+      * +100 if both rounds are above 700.
       * +200 if every round's response stayed in the same key (we approximate
         this as ``raw.key_consistency >= 0.8`` in every round).
 
@@ -195,13 +195,8 @@ def session_summary(round_results: Sequence[dict]) -> dict:
     base = sum(r["total"] for r in round_results)
     bonus = 0
 
-    # Combo: 3 consecutive rounds >= 700.
-    streak = 0
-    max_streak = 0
-    for r in round_results:
-        streak = streak + 1 if r["total"] >= 700 else 0
-        max_streak = max(max_streak, streak)
-    if max_streak >= 3:
+    # Combo: 두 라운드 모두 700 이상이면 보너스.
+    if all(r["total"] >= 700 for r in round_results):
         bonus += 100
 
     # All-rounds in key.

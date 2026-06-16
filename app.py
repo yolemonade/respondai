@@ -2483,7 +2483,7 @@ def s5_html(state: dict) -> str:
 <div class="s5-stage s5-stage-v2">
   <div class="s5-label">● FINAL RESULT</div>
   <div class="s5-grade" style="color:{gc};">{grade}</div>
-  <div class="s5-total">{final_total} <span class="s5-of">/ 5000</span></div>
+  <div class="s5-total">{final_total} <span class="s5-of">/ 2000</span></div>
   {flavor}
   {bonus_detail}
   <div class="s5-cols">
@@ -4026,11 +4026,11 @@ with gr.Blocks(**_blocks_kwargs) as app:
             <div class="ra-grade-row"><span>TRY AGAIN</span><span>&lt; 600</span></div>
           </div>
           <div class="ra-grade-block">
-            <div class="ra-grade-cap">최종 등급 (5000점 만점)</div>
-            <div class="ra-grade-row"><span>S</span><span>4500+</span></div>
-            <div class="ra-grade-row"><span>A</span><span>3500+</span></div>
-            <div class="ra-grade-row"><span>B</span><span>2500+</span></div>
-            <div class="ra-grade-row"><span>C</span><span>&lt; 2500</span></div>
+            <div class="ra-grade-cap">최종 등급 (2000점 만점)</div>
+            <div class="ra-grade-row"><span>S</span><span>1800+</span></div>
+            <div class="ra-grade-row"><span>A</span><span>1400+</span></div>
+            <div class="ra-grade-row"><span>B</span><span>1000+</span></div>
+            <div class="ra-grade-row"><span>C</span><span>&lt; 1000</span></div>
           </div>
         </div>
       </div>
