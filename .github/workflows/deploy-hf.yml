@@ -1,0 +1,43 @@
+name: Deploy to HF Spaces
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install huggingface_hub
+        run: pip install huggingface_hub -q
+
+      - name: Upload to HF Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+          api.upload_folder(
+              folder_path=".",
+              repo_id="uuyeong/respondai",
+              repo_type="space",
+              ignore_patterns=[
+                  ".git/*",
+                  ".github/*",
+                  ".cursor-screens/*",
+                  "scripts/*.png",
+                  "scripts/_*",
+                  "checkpoints/*",
+                  "**/__pycache__/*",
+                  "**/*.pyc",
+                  "deploy/*",
+              ],
+          )
+          print("Deployed successfully!")
+          EOF
