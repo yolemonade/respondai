@@ -4049,7 +4049,7 @@ with gr.Blocks(**_blocks_kwargs) as app:
       <p>RespondAI는 음악 AI와 사람의 즉흥 인터랙션을 탐구하는 <b>Deep Learning for Music and Audio</b> final project입니다.</p>
       <ul class="ra-modal-list ra-modal-list-bullets">
         <li><b>박시현 — 모델 &amp; 분석</b> · 데이터 전처리, Transformer 기반 Call &amp; Response 생성 모델, 응답 점수화 로직.</li>
-        <li><b>강유영\ — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
+        <li><b>강유영 — 프론트엔드 &amp; UX</b> · Gradio 기반 인터랙션, 가상 피아노 입력, 라운드 흐름과 결과 화면 설계.</li>
       </ul>
       <p class="ra-modal-foot">코드와 자세한 문서는 상단의 GitHub 링크에서 확인하세요.</p>
     </div>
