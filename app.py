@@ -2360,14 +2360,19 @@ def s4_html(state: dict) -> str:
         return ""
     rr = results[-1]
     exs = rr["exchange_scores"]
-    round_total = int(sum(s["total"] for s in exs) / len(exs))
+    n = len(exs)
+    avg_key        = int(sum(s["key_consistency"]  for s in exs) / n)
+    avg_rhythm     = int(sum(s["rhythm_similarity"] for s in exs) / n)
+    avg_motif      = int(sum(s["motif_usage"]       for s in exs) / n)
+    avg_creativity = int(sum(s["creativity_bonus"]  for s in exs) / n)
+    round_total    = avg_key + avg_rhythm + avg_motif + avg_creativity
     grade = round_grade(round_total)
 
     bars = (
-        score_bar_html("Key consistency",  exs[-1]["key_consistency"],   300, "#9B8FD4")
-        + score_bar_html("Rhythm similarity", exs[-1]["rhythm_similarity"],300, "#7B9FD4")
-        + score_bar_html("Motif usage",       exs[-1]["motif_usage"],       300, "#A8D8E8")
-        + score_bar_html("Creativity",        exs[-1]["creativity_bonus"], 100, "#C8C5E8")
+        score_bar_html("Key consistency",  avg_key,        300, "#9B8FD4")
+        + score_bar_html("Rhythm similarity", avg_rhythm,  300, "#7B9FD4")
+        + score_bar_html("Motif usage",       avg_motif,   300, "#A8D8E8")
+        + score_bar_html("Creativity",        avg_creativity, 100, "#C8C5E8")
     )
     r5_bonus = ""
     if rr["round_num"] == 5 and rr.get("r5_motif_bonus"):
@@ -4442,7 +4447,13 @@ with gr.Blocks(**_blocks_kwargs) as app:
     def _finalize_round(st: dict) -> None:
         exs = st["exchange_log"]
         exchange_scores = [e["score"] for e in exs]
-        round_total = int(sum(s["total"] for s in exchange_scores) / len(exchange_scores))
+        n = len(exchange_scores)
+        round_total = (
+            int(sum(s["key_consistency"]  for s in exchange_scores) / n)
+            + int(sum(s["rhythm_similarity"] for s in exchange_scores) / n)
+            + int(sum(s["motif_usage"]       for s in exchange_scores) / n)
+            + int(sum(s["creativity_bonus"]  for s in exchange_scores) / n)
+        )
         r5_bonus = False
         if st["round"] == TOTAL_ROUNDS and st["r1_motif"]:
             last_motif_raw = exchange_scores[-1]["raw"]["motif_overlap"]
