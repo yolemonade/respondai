@@ -2398,15 +2398,16 @@ def s5_html(state: dict) -> str:
         return ""
 
     # Compute final score
-    # Collect per-round average scores for session_summary
     per_round_scores = []
     r5_motif_bonus = 0
     for rr in round_results:
         exs = rr["exchange_scores"]
-        avg_total = int(sum(s["total"] for s in exs) / len(exs))
-        # Rebuild a summary-compatible dict (scoring.session_summary takes list of exchange dicts)
-        # We use the last exchange score as representative
-        per_round_scores.append({**exs[-1], "total": avg_total})
+        n = len(exs)
+        avg_key_raw = sum(s["raw"]["key_consistency"] for s in exs) / n
+        per_round_scores.append({
+            "total": rr["total"],
+            "raw": {"key_consistency": avg_key_raw, "rhythm_pearson": 0, "motif_overlap": 0},
+        })
 
     summary = session_summary(per_round_scores)
 
