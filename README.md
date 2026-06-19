@@ -1,25 +1,12 @@
----
-title: RespondAI
-emoji: 🎹
-colorFrom: purple
-colorTo: blue
-sdk: gradio
-sdk_version: "5.33.0"
-app_file: app.py
-pinned: false
----
-
 # RespondAI
 
 > A call & response with AI — 재즈 즉흥연주의 AI 대화 게임
-
-[![HF Spaces](https://img.shields.io/badge/🤗-HuggingFace%20Spaces-blue)](https://huggingface.co/spaces/uuyeong/respondai)
 
 ---
 
 ## 데모
 
-**▶ [Demo](https://huggingface.co/spaces/uuyeong/respondai)**
+**▶ [Huggingface Demo](https://huggingface.co/spaces/uuyeong/respondai)**
 
 ![메인화면](docs/images/메인화면.png)
 
