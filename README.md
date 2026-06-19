@@ -9,137 +9,99 @@ app_file: app.py
 pinned: false
 ---
 
-# RespondAI — Call-and-Response Improv Game
+# RespondAI 🎹
 
-A small Decoder-only Transformer that answers your 4-bar melody with its own,
-trained from scratch on the Lakh MIDI Dataset.
+> A call & response with AI — 재즈 즉흥연주의 AI 대화 게임
 
-This repo is the **model-side codebase** (team A's deliverable). For the
-Streamlit game UI, see team B.
+[![HF Spaces](https://img.shields.io/badge/🤗-HuggingFace%20Spaces-blue)](https://huggingface.co/spaces/uuyeong/respondai)
 
 ---
 
-## Repo layout
+## 데모
+
+**▶ [지금 플레이하기](https://huggingface.co/spaces/uuyeong/respondai)**
+
+![메인화면](docs/images/메인화면.png)
+
+---
+
+## 게임 소개
+
+재즈에서 두 연주자가 멜로디를 주고받는 **Call & Response**에서 아이디어를 얻었습니다.
+유저가 멜로디를 연주하면, AI가 그에 응답하는 방식으로 즉흥 연주 세션이 진행됩니다.
+
+### 게임 흐름
+
+- **2라운드** 구성, 매 라운드마다 Key와 BPM이 랜덤 지정
+- 라운드 안에서 유저와 AI가 **3번씩** 멜로디를 주고받음
+- **Round 1** — 자유롭게 연주 (모티프 저장)
+- **Round 2** — AI 멜로디에 호응
+
+### 입력 방식
+
+| 모드 | 상태 |
+|------|------|
+| 피아노 모드 | ✅ 완성 |
+| 허밍 모드 | 🔬 베타 (환경에 따라 음정 인식 불안정) |
+
+---
+
+## 화면 구성
+
+### 피아노 모드 — 게임 진행
+
+![피아노모드진행](docs/images/피아노모드진행.png)
+
+피아노 건반으로 음표를 입력하고 Confirm으로 제출하면 AI가 응답합니다.
+상단 피아노롤에서 유저(파랑)와 AI(빨강)의 멜로디를 실시간으로 확인할 수 있습니다.
+
+### 허밍 모드
+
+![허밍모드](docs/images/허밍모드.png)
+
+마이크로 허밍하면 PESTO 모델이 음정을 인식해 Note로 변환합니다.
+
+### 라운드 결과
+
+![라운드결과](docs/images/라운드결과.png)
+
+3교환의 항목별 평균으로 채점됩니다.
+
+| 항목 | 만점 | 기준 |
+|------|------|------|
+| Key consistency | 300 | 조성 안 음표 비율 |
+| Rhythm similarity | 300 | AI 프레이즈와 리듬 상관관계 |
+| Motif usage | 300 | R1 모티프 n-gram 겹침 |
+| Creativity | 100 | 복사도 아니고 무관도 아닌 중간 |
+
+### 최종 결과
+
+![최종결과](docs/images/최종결과.png)
+
+2라운드 합산 최대 2000점, S·A·B·C 등급과 항목별 분석, 전체 피아노롤 제공.
+
+---
+
+## AI 생성 원리
 
 ```
-respondai/
-├── data/
-│   ├── tokenizer.py         REMI-style tokenizer (vocab ≈ 180)
-│   ├── midi_utils.py        MIDI → monophonic Note sequence
-│   ├── call_response.py     Sliding-window pair generation + key estimation
-│   ├── preprocess.py        Build the binary token cache
-│   └── dataset.py           PyTorch Dataset + RESPONSE-only loss mask
-├── model/
-│   ├── attention.py         Causal multi-head self-attention (from scratch)
-│   ├── positional.py        Sinusoidal positional encoding
-│   ├── transformer.py       Decoder-only Transformer (Pre-LN, KV cache)
-│   └── config.py            sanity_config (~3M) / full_config (~10M)
-├── training/
-│   ├── train.py             AdamW + warmup-cosine, AMP, checkpointing
-│   └── evaluate.py          Perplexity + sample-level game-score eval
-├── inference/
-│   ├── generate.py          generate(): top-p sampling with KV cache  ← team B uses this
-│   └── decode.py            Notes → MIDI / WAV                        ← team B uses this
-├── analysis/
-│   ├── motif.py             n-gram interval overlap
-│   ├── rhythm.py            Onset-vector Pearson correlation
-│   └── scoring.py           score_response()                          ← team B uses this
-├── scripts/
-│   ├── download_data.sh
-│   ├── run_preprocess.py
-│   ├── run_sanity.py
-│   └── run_train.py
-├── INTERFACE.md             Public API for team B (read this first if you're B)
-├── requirements.txt
-└── README.md
+유저 음표
+  → REMI 토큰화 (POS + PITCH + DUR, 16분음표 단위)
+  → Decoder-only Transformer (~19M params, Lakh MIDI 학습)
+     온도 0.82 / 0.95 / 1.08 / 1.18 → 4개 후보 동시 생성
+  → 음악적 Reranker → 최적 1개 선택
+  → Fast Synth (~10ms) + 재즈 반주 (Bass × Comp 랜덤 조합)
+  → WAV 출력
 ```
 
----
-
-## Quick start
-
-```bash
-# 1. Environment
-pip install -r requirements.txt
-
-# 2. Data
-bash scripts/download_data.sh nottingham      # small + instant
-bash scripts/download_data.sh lakh            # large, for the real run
-
-# 3. Tokenize
-python -m scripts.run_preprocess \
-    --midi-root datasets/nottingham \
-    --out data_cache/nottingham.npz
-
-# 4. Sanity-check the pipeline (a few minutes on any GPU)
-python -m scripts.run_sanity \
-    --cache data_cache/nottingham.npz \
-    --steps 2000
-
-# 5. Full training (a few hours on a single A100 / Colab T4)
-python -m scripts.run_preprocess \
-    --midi-root datasets/lakh \
-    --out data_cache/lakh.npz
-python -m scripts.run_train \
-    --cache data_cache/lakh.npz \
-    --steps 20000
-```
+**데이터셋**: [Lakh MIDI Dataset](https://colinraffel.com/projects/lmd/) — 약 17만 개 MIDI 파일
+**모델**: [uuyeong/respondai-model](https://huggingface.co/uuyeong/respondai-model)
 
 ---
 
-## What "good" looks like
+## 팀
 
-| Stage                          | Expected outcome                                                |
-|--------------------------------|-----------------------------------------------------------------|
-| Sanity, step 0                 | loss ≈ ln(180) ≈ 5.2 (uniform over vocab)                       |
-| Sanity, step 2 000             | loss < 1.5 on Nottingham                                        |
-| Full run, end                  | val PPL < 10 on Lakh held-out (target from spec)                |
-| Inference on Mac MPS           | < 1 s for a 4-bar response (~80 generated tokens)               |
-| Inference on CUDA A100         | < 0.3 s                                                          |
-
-If sanity loss plateaus near 5 instead of falling: the loss mask is wrong.
-Check that `[RESPONSE]` is being found in every sequence and that the mask
-covers positions *after* it.
-
----
-
-## Design decisions (the short version)
-
-| Decision              | Choice                                  | Why                                                |
-|-----------------------|------------------------------------------|----------------------------------------------------|
-| Tokenization          | REMI-style: `[BAR] [POS] [PITCH] [DUR]`  | Bar-aware; compact; transposition-friendly         |
-| Pitch range           | MIDI 21–108 (88 piano keys)              | Drops unused extremes; smaller vocabulary          |
-| Rest representation   | Implicit (POS jump or BAR token)         | No separate rest vocab; shorter sequences          |
-| Key/Tempo prefix      | Yes (`[KEY_*] [TEMPO_*]` before [CALL])  | Direct conditioning matches the game's UX          |
-| Velocity              | Not modelled                             | Monophonic melody; velocity adds noise, not signal |
-| Positional encoding   | Sinusoidal (Vaswani 2017)                | Matches the lecture; works fine at this scale      |
-| Block layout          | Pre-LN                                   | Trains far more stably than Post-LN                |
-| Sampling              | top-p (0.9) + temperature (1.0)          | Most musical default; greedy collapses             |
-| Loss masking          | Score RESPONSE only                      | CALL is context, not target                        |
-| Key estimation        | music21 Krumhansl-Schmuckler             | Pure Python; robust for 4-bar fragments            |
-
----
-
-## Coordination with team B
-
-The contract is **INTERFACE.md**. Three functions are the only public surface:
-
-* `inference.generate.generate(model, tokenizer, call_notes, key, tempo, ...)`
-* `inference.decode.decode_tokens_to_notes(tokens, tokenizer)`
-* `analysis.scoring.score_response(call_notes, response_notes, key)`
-
-These are pure and synchronous. Cache the model in
-`@st.cache_resource` and you'll never wait for it again.
-
----
-
-## Known limits (be honest in the demo)
-
-* The model is trained on Western tonal monophony; non-Western scales will be
-  scored harshly by `key_consistency` because the scale definitions
-  only cover major and natural minor.
-* `decode_tokens_to_notes` is lenient — malformed token streams produce empty
-  outputs rather than raising. If you see an empty response unexpectedly, it's
-  the model, not the decoder.
-* `notes_to_wav` requires FluidSynth to be installed system-wide. On Mac:
-  `brew install fluid-synth`. On Linux: `apt-get install fluidsynth`.
+| 역할 | 이름 | 담당 |
+|------|------|------|
+| 모델 & 분석 | 박시현 | Transformer 학습, 토크나이저, 채점 로직 |
+| 프론트 & UX | 강유영 | Gradio 앱, 피아노 입력, 라운드 흐름, 결과 화면 |
