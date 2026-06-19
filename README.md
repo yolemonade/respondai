@@ -9,7 +9,7 @@ app_file: app.py
 pinned: false
 ---
 
-# RespondAI 🎹
+# RespondAI
 
 > A call & response with AI — 재즈 즉흥연주의 AI 대화 게임
 
@@ -19,7 +19,7 @@ pinned: false
 
 ## 데모
 
-**▶ [지금 플레이하기](https://huggingface.co/spaces/uuyeong/respondai)**
+**▶ [Demo](https://huggingface.co/spaces/uuyeong/respondai)**
 
 ![메인화면](docs/images/메인화면.png)
 
@@ -41,8 +41,8 @@ pinned: false
 
 | 모드 | 상태 |
 |------|------|
-| 피아노 모드 | ✅ 완성 |
-| 허밍 모드 | 🔬 베타 (환경에 따라 음정 인식 불안정) |
+| 피아노 모드 | 완성 |
+| 허밍 모드 | s베타 (환경에 따라 음정 인식 불안정) |
 
 ---
 
